@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Data & cache (too large for GitHub)
+data/raw_data.parquet
+data/processed_data.parquet
+
+# Ray Tune results
+ray_results/
+
+# Conda
+.conda/
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
