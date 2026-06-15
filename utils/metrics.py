@@ -63,14 +63,13 @@ def compute_all_metrics(returns: np.ndarray, portfolio_values: np.ndarray) -> di
 
 def equal_weight_baseline(df: pd.DataFrame, tickers: list, initial_capital: float = 1e6):
     """
-    Equal-weight buy-and-hold baseline.
+    Equal-weight buy-and-hold baseline (no costs, kept for backward compatibility).
     df must have columns: date, tic, close
     Returns (metrics_dict, port_values array, dates array)
     """
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
     pivot = df.pivot(index="date", columns="tic", values="close")
-    # Only use tickers present in the data
     available = [t for t in tickers if t in pivot.columns]
     pivot = pivot[available].dropna()
     daily_returns = pivot.pct_change().dropna()
@@ -82,17 +81,35 @@ def equal_weight_baseline(df: pd.DataFrame, tickers: list, initial_capital: floa
     return metrics, port_values, dates
 
 
-def print_comparison(agent_metrics: dict, baseline_metrics: dict):
-    """Pretty-print agent vs baseline metrics table."""
-    header = f"{'Metric':<20} {'SAC Agent':>12} {'Equal-Weight':>14} {'Δ':>10}"
+_DISPLAY_KEYS = [
+    "sharpe", "sortino", "calmar", "max_drawdown",
+    "total_return", "ann_return", "ann_volatility", "win_rate",
+]
+
+
+def print_comparison(results: dict):
+    """
+    Print a multi-column comparison table.
+
+    results: dict mapping strategy name → metrics dict.
+             First key is the primary strategy (typically the SAC agent).
+    """
+    names = list(results.keys())
+    col_w = 13
+
+    header = f"  {'Metric':<18}" + "".join(f"{n:>{col_w}}" for n in names)
     sep = "─" * len(header)
     print(sep)
     print(header)
     print(sep)
-    for k in agent_metrics:
-        a = agent_metrics[k]
-        b = baseline_metrics.get(k, np.nan)
-        delta = a - b
-        sign = "+" if delta > 0 else ""
-        print(f"  {k:<18} {a:>12.4f} {b:>14.4f} {sign}{delta:>9.4f}")
+
+    for k in _DISPLAY_KEYS:
+        row = f"  {k:<18}"
+        for name in names:
+            v = results[name].get(k, float("nan"))
+            try:
+                row += f"{v:>{col_w}.4f}"
+            except (TypeError, ValueError):
+                row += f"{'N/A':>{col_w}}"
+        print(row)
     print(sep)

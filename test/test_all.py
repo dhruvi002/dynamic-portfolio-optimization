@@ -10,7 +10,7 @@ import torch
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.sac import SACAgent, Actor, Critic, ReplayBuffer
+from agent.sac import SACAgent, DirichletActor, Critic, ReplayBuffer
 from environment.portfolio_env import PortfolioEnv
 from utils.metrics import compute_sharpe, compute_sortino, compute_max_drawdown
 

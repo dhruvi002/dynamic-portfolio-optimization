@@ -2,17 +2,17 @@
 Soft Actor-Critic (SAC) Agent for Portfolio Optimization
 =========================================================
 Implements SAC with:
-  - Continuous action space (portfolio weights ∈ [0,1], sum=1)
-  - Automatic entropy tuning (target_entropy = -dim(A))
+  - Dirichlet policy for portfolio weights on the K-simplex
+  - Automatic entropy tuning with Dirichlet-correct target entropy
   - Twin critics to reduce Q-value overestimation
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-from torch.distributions import Normal
 from collections import deque
 import random
 
@@ -20,7 +20,7 @@ import random
 # ─── Replay Buffer ────────────────────────────────────────────────────────────
 
 class ReplayBuffer:
-    """Standard replay buffer. Swap for PrioritizedReplayBuffer for PER."""
+    """Standard replay buffer."""
 
     def __init__(self, capacity: int = 1_000_000):
         self.buffer = deque(maxlen=capacity)
@@ -54,54 +54,120 @@ def _mlp(in_dim: int, hidden: list, out_dim: int, activation=nn.ReLU):
     return nn.Sequential(*layers)
 
 
-class Actor(nn.Module):
+class AssetTransformerEncoder(nn.Module):
     """
-    Gaussian policy. Outputs mean & log_std, then samples via reparameterisation.
-    Applies softmax so actions represent portfolio weights summing to 1.
-    """
-    LOG_STD_MIN, LOG_STD_MAX = -5, 2
+    Treats each asset as a sequence token with its per-asset features.
 
-    def __init__(self, state_dim: int, action_dim: int, hidden: list = [256, 256]):
+    State is feature-major: [feat0×n_assets | feat1×n_assets | ...].
+    We reshape to [B, n_features, n_assets] then transpose to [B, n_assets, n_features]
+    so each asset attends to all others with full cross-asset attention.
+    """
+
+    def __init__(self, n_features: int = 6, n_assets: int = 30,
+                 d_model: int = 64, nhead: int = 4, n_layers: int = 2):
         super().__init__()
-        self.net = _mlp(state_dim, hidden[:-1], hidden[-1])
-        self.mean_head = nn.Linear(hidden[-1], action_dim)
-        self.log_std_head = nn.Linear(hidden[-1], action_dim)
+        self.n_features = n_features
+        self.n_assets   = n_assets
+        self.embed       = nn.Linear(n_features, d_model)
+        encoder_layer    = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward=256, batch_first=True, dropout=0.0
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, n_layers)
+        self.out_dim     = n_assets * d_model
 
-    def forward(self, state):
-        x = F.relu(self.net(state))
-        mean = self.mean_head(x)
-        log_std = self.log_std_head(x).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
-        return mean, log_std
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        B = state.shape[0]
+        # state is feature-major → [B, n_features, n_assets] → [B, n_assets, n_features]
+        x = state.view(B, self.n_features, self.n_assets).transpose(1, 2)
+        x = self.embed(x)         # [B, n_assets, d_model]
+        x = self.transformer(x)   # [B, n_assets, d_model]
+        return x.flatten(1)       # [B, n_assets * d_model]
 
-    def sample(self, state):
-        mean, log_std = self(state)
-        std = log_std.exp()
-        dist = Normal(mean, std)
-        z = dist.rsample()                          # reparameterisation trick
-        action_raw = torch.tanh(z)                  # squash to (-1, 1)
-        action = F.softmax(action_raw, dim=-1)      # portfolio weights
 
-        # Log prob with tanh squashing correction
-        log_prob = dist.log_prob(z) - torch.log(1 - action_raw.pow(2) + 1e-6)
-        log_prob = log_prob.sum(dim=-1, keepdim=True)
-        return action, log_prob, torch.tanh(mean)
+class DirichletActor(nn.Module):
+    """
+    Dirichlet policy for portfolio weights on the K-simplex.
+
+    Outputs concentration parameters α_i ∈ [CONC_MIN, CONC_MAX] via
+    softplus + clamp, then samples via PyTorch's reparameterized Dirichlet
+    (implicit reparameterization through Gamma).  log_prob() is the exact
+    Dirichlet log-density — no Jacobian approximations needed.
+    """
+    CONC_MIN = 1e-2
+    CONC_MAX = 50.0
+
+    def __init__(self, state_dim: int, action_dim: int, hidden: list = None,
+                 encoder: str = "mlp", n_assets: int = 30):
+        super().__init__()
+        if hidden is None:
+            hidden = [256, 256]
+        self.use_transformer = encoder == "transformer"
+        if self.use_transformer:
+            n_features       = state_dim // n_assets
+            self.encoder     = AssetTransformerEncoder(n_features=n_features, n_assets=n_assets)
+            net_in_dim       = self.encoder.out_dim
+        else:
+            net_in_dim = state_dim
+        self.net       = _mlp(net_in_dim, hidden[:-1], hidden[-1])
+        self.conc_head = nn.Linear(hidden[-1], action_dim)
+
+    def _concentrations(self, state: torch.Tensor) -> torch.Tensor:
+        h    = self.encoder(state) if self.use_transformer else state
+        x    = F.relu(self.net(h))
+        conc = F.softplus(self.conc_head(x)) + 1e-3
+        return conc.clamp(self.CONC_MIN, self.CONC_MAX)
+
+    def sample(self, state: torch.Tensor):
+        """
+        Returns (action, log_prob, mean).
+          action   : [B, K]  — reparameterized sample on simplex
+          log_prob : [B, 1]  — Dirichlet log-density at action
+          mean     : [B, K]  — distribution mean (α_i / Σ α_j)
+        """
+        conc     = self._concentrations(state)
+        dist     = torch.distributions.Dirichlet(conc)
+        action   = dist.rsample()                          # implicit reparam
+        log_prob = dist.log_prob(action).unsqueeze(1)      # [B, 1]
+        return action, log_prob, dist.mean
+
+    def mean_action(self, state: torch.Tensor) -> torch.Tensor:
+        """Deterministic action: Dirichlet mean = α_i / Σ α_j."""
+        conc = self._concentrations(state)
+        return torch.distributions.Dirichlet(conc).mean
+
+
+# Keep old name as alias so existing imports don't break.
+Actor = DirichletActor
 
 
 class Critic(nn.Module):
     """Twin Q-networks (Q1, Q2) — takes (state, action) → Q-value."""
 
-    def __init__(self, state_dim: int, action_dim: int, hidden: list = [256, 256]):
+    def __init__(self, state_dim: int, action_dim: int, hidden: list = None,
+                 encoder: str = "mlp", n_assets: int = 30):
         super().__init__()
-        in_dim = state_dim + action_dim
+        if hidden is None:
+            hidden = [256, 256]
+        self.use_transformer = encoder == "transformer"
+        if self.use_transformer:
+            n_features   = state_dim // n_assets
+            self.encoder = AssetTransformerEncoder(n_features=n_features, n_assets=n_assets)
+            in_dim       = self.encoder.out_dim + action_dim
+        else:
+            in_dim = state_dim + action_dim
         self.q1 = _mlp(in_dim, hidden, 1)
         self.q2 = _mlp(in_dim, hidden, 1)
 
+    def _encode(self, state, action):
+        enc = self.encoder(state) if self.use_transformer else state
+        return torch.cat([enc, action], dim=-1)
+
     def forward(self, state, action):
-        x = torch.cat([state, action], dim=-1)
+        x = self._encode(state, action)
         return self.q1(x), self.q2(x)
 
     def q1_value(self, state, action):
-        x = torch.cat([state, action], dim=-1)
+        x = self._encode(state, action)
         return self.q1(x)
 
 
@@ -134,12 +200,13 @@ class SACAgent:
         buffer_size: int = 1_000_000,
         hidden_sizes: list = None,
         device: str = "auto",
+        encoder: str = "mlp",
     ):
         if hidden_sizes is None:
             hidden_sizes = [256, 256]
 
-        self.gamma = gamma
-        self.tau = tau
+        self.gamma      = gamma
+        self.tau        = tau
         self.batch_size = batch_size
         self.action_dim = action_dim
 
@@ -147,24 +214,32 @@ class SACAgent:
             "cuda" if torch.cuda.is_available() else "cpu"
         ) if device == "auto" else torch.device(device)
 
+        # n_assets == action_dim for this project (one weight per asset)
+        n_assets = action_dim
+
         # Networks
-        self.actor = Actor(state_dim, action_dim, hidden_sizes).to(self.device)
-        self.critic = Critic(state_dim, action_dim, hidden_sizes).to(self.device)
-        self.critic_target = Critic(state_dim, action_dim, hidden_sizes).to(self.device)
+        self.actor        = DirichletActor(state_dim, action_dim, hidden_sizes, encoder=encoder, n_assets=n_assets).to(self.device)
+        self.critic       = Critic(state_dim, action_dim, hidden_sizes, encoder=encoder, n_assets=n_assets).to(self.device)
+        self.critic_target = Critic(state_dim, action_dim, hidden_sizes, encoder=encoder, n_assets=n_assets).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # Automatic entropy tuning
-        self.target_entropy = -action_dim  # heuristic: -|A|
+        # Automatic entropy tuning.
+        # For a Dirichlet on K-simplex the maximum differential entropy is
+        # H_max = -log Γ(K) ≈ -71 nats for K=30 (attained by the uniform
+        # Dirichlet α_i=1).  The standard SAC heuristic -K would be wildly
+        # above H_max, making α collapse to 0.  We target slightly below H_max
+        # to allow moderate portfolio concentration while still regularising.
+        self.target_entropy = -(math.lgamma(action_dim) + action_dim * 0.5)
         self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
         self.alpha = self.log_alpha.exp().item()
 
         # Optimisers
-        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr_actor)
+        self.actor_opt  = optim.Adam(self.actor.parameters(),  lr=lr_actor)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr_critic)
-        self.alpha_opt = optim.Adam([self.log_alpha], lr=lr_alpha)
+        self.alpha_opt  = optim.Adam([self.log_alpha],          lr=lr_alpha)
 
         self.replay_buffer = ReplayBuffer(buffer_size)
-        self.total_steps = 0
+        self.total_steps   = 0
 
     # ── Action selection ──────────────────────────────────────────────────────
 
@@ -172,8 +247,8 @@ class SACAgent:
     def select_action(self, state: np.ndarray, deterministic: bool = False):
         state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         if deterministic:
-            _, _, action = self.actor.sample(state_t)
-            action = F.softmax(action, dim=-1)
+            # Use the Dirichlet mean — same distribution as training, no double transform.
+            action = self.actor.mean_action(state_t)
         else:
             action, _, _ = self.actor.sample(state_t)
         return action.squeeze(0).cpu().numpy()
@@ -193,9 +268,9 @@ class SACAgent:
             next_actions, next_log_pi, _ = self.actor.sample(next_states)
             q1_next, q2_next = self.critic_target(next_states, next_actions)
             min_q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_pi
-            target_q = rewards + self.gamma * (1 - dones) * min_q_next
+            target_q   = rewards + self.gamma * (1 - dones) * min_q_next
 
-        q1, q2 = self.critic(states, actions)
+        q1, q2      = self.critic(states, actions)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
         self.critic_opt.zero_grad()
@@ -206,8 +281,8 @@ class SACAgent:
         # ── Actor loss ────────────────────────────────────────────────────────
         new_actions, log_pi, _ = self.actor.sample(states)
         q1_new, q2_new = self.critic(states, new_actions)
-        min_q_new = torch.min(q1_new, q2_new)
-        actor_loss = (self.alpha * log_pi - min_q_new).mean()
+        min_q_new      = torch.min(q1_new, q2_new)
+        actor_loss     = (self.alpha * log_pi - min_q_new).mean()
 
         self.actor_opt.zero_grad()
         actor_loss.backward()
@@ -230,27 +305,27 @@ class SACAgent:
 
         return {
             "critic_loss": critic_loss.item(),
-            "actor_loss": actor_loss.item(),
-            "alpha_loss": alpha_loss.item(),
-            "alpha": self.alpha,
+            "actor_loss":  actor_loss.item(),
+            "alpha_loss":  alpha_loss.item(),
+            "alpha":       self.alpha,
         }
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self, path: str):
         torch.save({
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
+            "actor":         self.actor.state_dict(),
+            "critic":        self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
-            "log_alpha": self.log_alpha,
-            "total_steps": self.total_steps,
+            "log_alpha":     self.log_alpha,
+            "total_steps":   self.total_steps,
         }, path)
 
     def load(self, path: str):
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.critic_target.load_state_dict(ckpt["critic_target"])
         self.log_alpha = ckpt["log_alpha"]
-        self.alpha = self.log_alpha.exp().item()
+        self.alpha     = self.log_alpha.exp().item()
         self.total_steps = ckpt["total_steps"]

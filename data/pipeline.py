@@ -102,10 +102,10 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def split_data(
     df: pd.DataFrame,
-    train_start: str = "2015-01-01",
-    train_end: str = "2020-12-31",
-    test_start: str = "2021-01-01",
-    test_end: str = "2023-12-31",
+    train_start: str = "2019-04-01",
+    train_end: str = "2022-12-31",
+    test_start: str = "2023-01-01",
+    test_end: str = "2025-01-31",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df["date"] = pd.to_datetime(df["date"])
     train = df[(df["date"] >= train_start) & (df["date"] <= train_end)].copy()
@@ -115,3 +115,26 @@ def split_data(
     print(f"  Test:  {test['date'].min().date()} -> {test['date'].max().date()} "
           f"({len(test['date'].unique())} trading days)")
     return train.reset_index(drop=True), test.reset_index(drop=True)
+
+
+def three_way_split(
+    df: pd.DataFrame,
+    train_start: str = "2019-04-01",
+    train_end: str = "2021-12-31",
+    val_start: str = "2022-01-01",
+    val_end: str = "2022-12-31",
+    test_start: str = "2023-01-01",
+    test_end: str = "2025-01-31",
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Chronological train / val / test split with no overlapping windows."""
+    df["date"] = pd.to_datetime(df["date"])
+    train = df[(df["date"] >= train_start) & (df["date"] <= train_end)].copy()
+    val   = df[(df["date"] >= val_start)   & (df["date"] <= val_end)].copy()
+    test  = df[(df["date"] >= test_start)  & (df["date"] <= test_end)].copy()
+    print(f"  Train: {train['date'].min().date()} -> {train['date'].max().date()} "
+          f"({len(train['date'].unique())} trading days)")
+    print(f"  Val:   {val['date'].min().date()} -> {val['date'].max().date()} "
+          f"({len(val['date'].unique())} trading days)")
+    print(f"  Test:  {test['date'].min().date()} -> {test['date'].max().date()} "
+          f"({len(test['date'].unique())} trading days)")
+    return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)

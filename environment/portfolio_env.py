@@ -43,6 +43,7 @@ class PortfolioEnv(gym.Env):
         reward_scaling: float = 1e-4,
         lookback: int = 1,
         seed: Optional[int] = None,
+        sentiment_df: Optional[pd.DataFrame] = None,
     ):
         super().__init__()
 
@@ -73,8 +74,22 @@ class PortfolioEnv(gym.Env):
         self.dates = sorted(self.df["date"].unique())
         self.n_steps = len(self.dates) - 1
 
-        # State: [weights(n), returns(n), tech(n × k)]
-        self.state_dim = self.n_assets + self.n_assets + self.n_assets * self.n_tech
+        # Optional sentiment — pre-pivot for O(1) lookup during step()
+        self.has_sentiment = sentiment_df is not None
+        if self.has_sentiment:
+            sdf = sentiment_df.copy()
+            sdf["date"] = pd.to_datetime(sdf["date"])
+            self._sentiment_pivot = (
+                sdf.pivot_table(index="date", columns="tic", values="sentiment_score")
+                   .reindex(columns=self.tickers)
+                   .fillna(0.0)
+            )
+
+        # State: [weights(n), returns(n), tech(n × k), (sentiment(n) if enabled)]
+        self.state_dim = (
+            self.n_assets + self.n_assets + self.n_assets * self.n_tech
+            + (self.n_assets if self.has_sentiment else 0)
+        )
         self.action_dim = self.n_assets
 
         self.observation_space = gym.spaces.Box(
@@ -100,12 +115,21 @@ class PortfolioEnv(gym.Env):
         tech = rows.loc[self.tickers, self.tech_indicators].values.astype(np.float32)
         return tech.flatten()
 
+    def _get_sentiment(self, date_idx: int) -> np.ndarray:
+        date = self.dates[date_idx]
+        if date in self._sentiment_pivot.index:
+            return self._sentiment_pivot.loc[date].values.astype(np.float32)
+        return np.zeros(self.n_assets, dtype=np.float32)
+
     def _build_state(self) -> np.ndarray:
         prices_now = self._get_prices(self.current_step)
         prices_prev = self._get_prices(max(self.current_step - 1, 0))
         returns = (prices_now - prices_prev) / (prices_prev + 1e-8)
         tech = self._get_tech(self.current_step)
-        return np.concatenate([self.weights, returns, tech]).astype(np.float32)
+        parts = [self.weights, returns, tech]
+        if self.has_sentiment:
+            parts.append(self._get_sentiment(self.current_step))
+        return np.concatenate(parts).astype(np.float32)
 
     # ── Gym interface ─────────────────────────────────────────────────────────
 
@@ -147,12 +171,13 @@ class PortfolioEnv(gym.Env):
         port_return = float(np.dot(new_weights, price_returns))     # weighted return
 
         # New portfolio value after return, costs, slippage
+        prev_value = self.portfolio_value          # capture BEFORE overwrite
         gross = self.portfolio_value * port_return
         net = gross - tc - slip
         self.portfolio_value = max(net, 1.0)  # floor at $1 to avoid log(0)
 
-        # Reward: log-return minus cost penalty
-        log_return = np.log(net / (self.portfolio_value + 1e-8) + 1e-8)
+        # log(net / prev) — computed against prev_value, not the updated field
+        log_return = np.log(max(net, 1e-8) / prev_value)
         reward = float(log_return * self.reward_scaling)
 
         self.weights = new_weights

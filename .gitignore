@@ -7,6 +7,9 @@ __pycache__/
 # Data & cache (too large for GitHub)
 data/raw_data.parquet
 data/processed_data.parquet
+data/nasdaq_exteral_data.csv
+data/sentiment_scores.parquet
+modularization-demo/
 
 # Ray Tune results
 ray_results/
