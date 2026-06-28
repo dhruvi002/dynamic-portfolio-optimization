@@ -304,10 +304,13 @@ class SACAgent:
         self.total_steps += 1
 
         return {
-            "critic_loss": critic_loss.item(),
-            "actor_loss":  actor_loss.item(),
-            "alpha_loss":  alpha_loss.item(),
-            "alpha":       self.alpha,
+            "critic_loss":   critic_loss.item(),
+            "actor_loss":    actor_loss.item(),
+            "alpha_loss":    alpha_loss.item(),
+            "alpha":         self.alpha,
+            # Mean policy entropy estimate (−E[log π]); paired with alpha this
+            # quantifies the entropy collapse diagnosed in Phase 1 (I-6).
+            "policy_entropy": float((-log_pi).mean().item()),
         }
 
     # ── Persistence ───────────────────────────────────────────────────────────

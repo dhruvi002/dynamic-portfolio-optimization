@@ -4,7 +4,9 @@ SEED ?= 42
 EPISODES ?= 500
 CONFIG ?= tuning/best_config.json
 
-.PHONY: help setup lock train backtest tune test repro clean
+SEEDS ?= 0 1 2 3 4
+
+.PHONY: help setup lock train backtest tune test repro evaluate clean
 
 help:
 	@echo "Targets:"
@@ -15,6 +17,7 @@ help:
 	@echo "  tune      Run Ray Tune HPO"
 	@echo "  test      Run the pytest suite"
 	@echo "  repro     Train twice with the same seed and diff the logs"
+	@echo "  evaluate  Phase 1 multi-seed eval (SEEDS=$(SEEDS) EPISODES=$(EPISODES) CONFIG=$(CONFIG))"
 
 setup:
 	conda env create -f environment.yml || conda env update -f environment.yml
@@ -44,6 +47,10 @@ repro:
 	cp checkpoints/training_log.csv /tmp/run_b.csv
 	@diff -q /tmp/run_a.csv /tmp/run_b.csv && echo "REPRODUCIBLE: logs identical" \
 		|| echo "NOT reproducible: logs differ"
+
+# Phase 1: honest multi-seed evaluation with CIs, significance test, diagnostics.
+evaluate:
+	python experiments/multi_seed.py --seeds $(SEEDS) --episodes $(EPISODES) --config $(CONFIG)
 
 clean:
 	rm -rf __pycache__ */__pycache__ .pytest_cache

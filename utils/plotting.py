@@ -94,6 +94,113 @@ def plot_backtest_comparison(
     return fig
 
 
+def plot_alpha_entropy(log_df: pd.DataFrame, save_path: str = None):
+    """
+    Plot the entropy temperature alpha (log scale) and the mean policy entropy
+    over training. Documents the entropy collapse diagnosed in Phase 1 (I-6).
+    """
+    fig, ax1 = plt.subplots(figsize=(11, 5))
+    fig.suptitle("Entropy Temperature & Policy Entropy over Training",
+                 fontsize=14, fontweight="bold")
+
+    if "alpha" in log_df.columns:
+        ax1.plot(log_df["episode"], log_df["alpha"].clip(lower=1e-30),
+                 color="darkorchid", lw=1.8, label="α (entropy temp)")
+        ax1.set_yscale("log")
+        ax1.set_ylabel("α  (log scale)", color="darkorchid")
+        ax1.tick_params(axis="y", labelcolor="darkorchid")
+    ax1.set_xlabel("Episode")
+    ax1.grid(alpha=0.3)
+
+    if "policy_entropy" in log_df.columns:
+        ax2 = ax1.twinx()
+        ax2.plot(log_df["episode"], log_df["policy_entropy"],
+                 color="seagreen", lw=1.8, label="policy entropy −E[log π]")
+        ax2.set_ylabel("Policy entropy", color="seagreen")
+        ax2.tick_params(axis="y", labelcolor="seagreen")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def plot_diagnostics_panel(
+    oos_diag: dict,
+    is_diag: dict = None,
+    save_path: str = None,
+):
+    """
+    One-page policy-behavior diagnostic figure (Phase 1, resolves I-5).
+
+    Four panels:
+      (1) Turnover Σ|Δw| per step (OOS, with IS overlay if provided).
+      (2) Weight concentration HHI per step vs the 1/N uniform floor.
+      (3) Active share vs equal-weight per step.
+      (4) In-sample vs out-of-sample equity curves (normalised) — the figure
+          that reconciles the IS/OOS gap.
+
+    `oos_diag` / `is_diag` are dicts returned by
+    `utils.diagnostics.policy_diagnostics`.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle("Phase 1 — Policy-Behavior Diagnostics", fontsize=15, fontweight="bold")
+
+    def _x(series):
+        return np.arange(len(series))
+
+    # (1) Turnover
+    ax = axes[0, 0]
+    ax.plot(_x(oos_diag["turnover_series"]), oos_diag["turnover_series"],
+            color="steelblue", lw=1.2, label=f"OOS (mean {oos_diag['mean_turnover']:.3f})")
+    if is_diag is not None:
+        ax.plot(_x(is_diag["turnover_series"]), is_diag["turnover_series"],
+                color="coral", lw=1.0, alpha=0.7,
+                label=f"IS (mean {is_diag['mean_turnover']:.3f})")
+    ax.set_title("Turnover  Σ|Δw|  per step")
+    ax.set_xlabel("Step"); ax.set_ylabel("Turnover"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+
+    # (2) HHI concentration
+    ax = axes[0, 1]
+    ax.plot(_x(oos_diag["hhi_series"]), oos_diag["hhi_series"],
+            color="steelblue", lw=1.2, label=f"OOS HHI (mean {oos_diag['mean_hhi']:.4f})")
+    if is_diag is not None:
+        ax.plot(_x(is_diag["hhi_series"]), is_diag["hhi_series"],
+                color="coral", lw=1.0, alpha=0.7, label="IS HHI")
+    ax.axhline(oos_diag["hhi_uniform_floor"], color="gray", ls=":", lw=1.2,
+               label=f"1/N uniform = {oos_diag['hhi_uniform_floor']:.4f}")
+    ax.set_title("Weight Concentration (HHI = Σ w²)")
+    ax.set_xlabel("Step"); ax.set_ylabel("HHI"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+
+    # (3) Active share
+    ax = axes[1, 0]
+    ax.plot(_x(oos_diag["active_share_series"]), oos_diag["active_share_series"],
+            color="steelblue", lw=1.2, label=f"OOS (mean {oos_diag['mean_active_share']:.3f})")
+    if is_diag is not None:
+        ax.plot(_x(is_diag["active_share_series"]), is_diag["active_share_series"],
+                color="coral", lw=1.0, alpha=0.7, label="IS")
+    ax.set_title("Active Share vs Equal-Weight  (0.5·Σ|w−1/N|)")
+    ax.set_xlabel("Step"); ax.set_ylabel("Active share"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+
+    # (4) IS vs OOS equity curves (normalised)
+    ax = axes[1, 1]
+    oos_v = oos_diag["portfolio_values"]
+    ax.plot(np.linspace(0, 1, len(oos_v)), oos_v / oos_v[0],
+            color="steelblue", lw=2, label="Out-of-sample (test)")
+    if is_diag is not None:
+        is_v = is_diag["portfolio_values"]
+        ax.plot(np.linspace(0, 1, len(is_v)), is_v / is_v[0],
+                color="coral", lw=2, ls="--", label="In-sample (train)")
+    ax.axhline(1.0, color="gray", ls=":", lw=1)
+    ax.set_title("Equity Curve: In-Sample vs Out-of-Sample (normalised)")
+    ax.set_xlabel("Normalised time"); ax.set_ylabel("Value / start"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def plot_weight_heatmap(weights_history: np.ndarray, tickers: list, save_path: str = None):
     """Heatmap of portfolio weights over time."""
     fig, ax = plt.subplots(figsize=(16, 6))
