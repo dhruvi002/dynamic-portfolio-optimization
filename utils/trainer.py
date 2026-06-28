@@ -30,6 +30,7 @@ def train(
     writer=None,
     normalizer=None,
     val_env=None,
+    seed=None,
 ) -> list:
     """
     Full training loop.
@@ -47,7 +48,7 @@ def train(
 
     # ── Warm-up: fill replay buffer with random transitions ─────────────────
     print(f"Warming up replay buffer ({warmup_steps} random steps)…")
-    state, _ = env.reset()
+    state, _ = env.reset(seed=seed)
     step = 0
     while step < warmup_steps:
         norm_state = _norm(normalizer, state, update=True)

@@ -21,6 +21,8 @@ from config import (DOWNLOAD_START, TRAIN_START, TRAIN_PROPER_END,
 from data.pipeline import download_data, add_technical_indicators, split_data, three_way_split
 from environment.portfolio_env import PortfolioEnv
 from agent.sac import SACAgent
+from utils.seeding import set_global_seed
+from utils.run_meta import write_run_meta
 from utils.trainer import train, backtest
 from utils.metrics import print_comparison
 from utils.normalizer import RunningNormalizer
@@ -42,13 +44,15 @@ DEFAULT_CONFIG = {
 NORMALIZER_PATH = "checkpoints/normalizer.pkl"
 
 
-def build_env(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> PortfolioEnv:
+def build_env(df: pd.DataFrame, sentiment_df: pd.DataFrame = None,
+              seed: int = None) -> PortfolioEnv:
     return PortfolioEnv(
         df,
         transaction_cost_rate=0.001,
         slippage_rate=0.001,
         initial_capital=1_000_000.0,
         sentiment_df=sentiment_df,
+        seed=seed,
     )
 
 
@@ -155,11 +159,18 @@ def mode_train(args, config: dict):
     if args.sentiment and sentiment_df is not None:
         merged_sentiment_df = sentiment_df
 
-    train_env = build_env(train_df, sentiment_df=merged_sentiment_df)
-    val_env   = build_env(val_df, sentiment_df=merged_sentiment_df)
+    train_env = build_env(train_df, sentiment_df=merged_sentiment_df, seed=args.seed)
+    val_env   = build_env(val_df, sentiment_df=merged_sentiment_df, seed=args.seed)
     agent     = build_agent(train_env, config, encoder=args.encoder)
     print(f"  State dim: {train_env.state_dim}  |  Action dim: {train_env.action_dim}")
     print(f"  Device: {agent.device}")
+
+    meta_path = write_run_meta(
+        "checkpoints", seed=args.seed, config=config, device=agent.device,
+        mode="train", episodes=args.episodes, encoder=args.encoder,
+        sentiment=bool(args.sentiment),
+    )
+    print(f"  Run metadata stamped \u2192 {meta_path}")
 
     # Normalizer: skip first n_assets dims (portfolio weights are already on simplex)
     normalizer = RunningNormalizer(train_env.state_dim, n_skip=train_env.n_assets)
@@ -180,6 +191,7 @@ def mode_train(args, config: dict):
         writer=writer,
         normalizer=normalizer,
         val_env=val_env,
+        seed=args.seed,
     )
 
     pd.DataFrame(logs).to_csv("checkpoints/training_log.csv", index=False)
@@ -261,7 +273,7 @@ def mode_backtest(args, config: dict):
         val_start=VAL_START,      val_end=TRAIN_END,
         test_start=TEST_START,    test_end=TEST_END,
     )
-    test_env = build_env(test_df, sentiment_df=sentiment_df)
+    test_env = build_env(test_df, sentiment_df=sentiment_df, seed=args.seed)
     agent    = build_agent(test_env, config, encoder=args.encoder)
     agent.load(args.checkpoint)
     print(f"  Loaded checkpoint: {args.checkpoint}")
@@ -288,6 +300,8 @@ def mode_backtest(args, config: dict):
 def main():
     parser = argparse.ArgumentParser(description="Deep RL Portfolio Optimization")
     parser.add_argument("--mode",           choices=["train", "tune", "backtest"], default="train")
+    parser.add_argument("--seed",           type=int, default=42,
+                        help="Global RNG seed for reproducible runs")
     parser.add_argument("--episodes",       type=int, default=100)
     parser.add_argument("--tune-samples",   type=int, default=50)
     parser.add_argument("--config",         type=str, default=None,
@@ -301,6 +315,9 @@ def main():
                         dest="sentiment_path",
                         help="Path to precomputed sentiment parquet")
     args = parser.parse_args()
+
+    set_global_seed(args.seed)
+    print(f"Global seed set: {args.seed}")
 
     config = DEFAULT_CONFIG.copy()
     if args.config and os.path.exists(args.config):

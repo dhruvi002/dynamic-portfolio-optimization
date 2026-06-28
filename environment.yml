@@ -1,0 +1,15 @@
+# Reproducible conda environment for the SAC portfolio-optimization project.
+# One-command setup:  conda env create -f environment.yml && conda activate portfolio-rl
+#
+# Versions below are pinned for reproducibility (Phase 0). They satisfy the
+# floors in requirements.txt and are known-good on Python 3.10 / macOS CPU.
+# To capture the EXACT set resolved on your machine, run `make lock` after
+# installing, which writes requirements.lock.txt via `pip freeze`.
+name: portfolio-rl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip=24.0
+  - pip:
+      - -r requirements.lock.txt

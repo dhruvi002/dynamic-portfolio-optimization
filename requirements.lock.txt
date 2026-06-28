@@ -1,0 +1,19 @@
+# Pinned, reproducible dependency set (Phase 0).
+# Best-effort pins satisfying requirements.txt floors on Python 3.10 (CPU).
+# Regenerate from your actual environment with:  make lock
+torch==2.2.2
+numpy==1.26.4
+pandas==2.2.2
+gymnasium==0.29.1
+yfinance==0.2.40
+finrl==0.3.6
+ray[tune]==2.9.3
+hyperopt==0.2.7
+matplotlib==3.8.4
+seaborn==0.13.2
+scikit-learn==1.4.2
+tensorboard==2.16.2
+tqdm==4.66.4
+ta==0.11.0
+pyfolio-reloaded==0.9.5
+transformers==4.40.2
