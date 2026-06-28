@@ -166,7 +166,10 @@ class TestSACAgent:
 class TestMetrics:
 
     def test_sharpe_positive_returns(self):
-        returns = np.ones(252) * 0.001
+        # Positive mean WITH non-zero variance → positive Sharpe.
+        # (Constant returns have std=0 and hit the zero-variance guard → 0.0,
+        #  covered by test_sharpe_zero_variance below.)
+        returns = np.full(252, 0.001) + np.linspace(-0.0005, 0.0005, 252)
         sharpe = compute_sharpe(returns)
         assert sharpe > 0
 
@@ -183,7 +186,8 @@ class TestMetrics:
         values = np.array([100, 110, 105, 90, 95, 100.0])
         mdd = compute_max_drawdown(values)
         assert mdd < 0
-        assert abs(mdd - (-90/110)) < 1e-4
+        # Peak 110 → trough 90 → drawdown = (90 - 110) / 110 = -20/110 ≈ -0.1818.
+        assert abs(mdd - (-20/110)) < 1e-4
 
     def test_max_drawdown_monotone(self):
         values = np.array([100, 105, 110, 115, 120.0])
