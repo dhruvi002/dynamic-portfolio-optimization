@@ -63,6 +63,24 @@ def _agent_return_series(env) -> pd.Series:
     return pd.Series(rets, index=dates, name="agent")
 
 
+def _net_metrics(env) -> dict:
+    """
+    Compute the agent's headline metrics from the **net-of-cost** value-path
+    returns (consistent with the equity curve, total_return, and the JK test),
+    and expose the **gross** Sharpe alongside so the transaction-cost impact is
+    visible. `backtest()`'s own metrics use the env's gross return array and so
+    overstate Sharpe/Sortino/Calmar whenever turnover (hence costs) is high.
+    """
+    from utils.metrics import compute_all_metrics, compute_sharpe
+    pv = np.asarray(env.history["portfolio_value"], dtype=float)
+    net = diag.returns_from_values(pv)
+    gross = np.asarray(env.history["returns"], dtype=float)   # info['port_return'], gross of cost
+    m = compute_all_metrics(net, pv)            # net Sharpe/Sortino/Calmar/vol/win_rate
+    m["final_value"] = float(pv[-1])
+    m["gross_sharpe"] = compute_sharpe(gross)   # annualized, gross of cost
+    return m
+
+
 def _equal_weight_return_series(test_df) -> pd.Series:
     """Equal-weight baseline daily returns, indexed by date (net of costs)."""
     from utils.baselines import equal_weight
@@ -96,15 +114,25 @@ def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
     )
     agent.load(ckpt_path)
 
-    # Out-of-sample (test) deterministic backtest
+    # Persist the per-seed normalizer so metrics can be recomputed offline
+    # without retraining.
+    import pickle
+    with open(os.path.join(ckpt_dir, f"seed_{seed}_normalizer.pkl"), "wb") as f:
+        pickle.dump(normalizer.state_dict(), f)
+
+    # Out-of-sample (test) deterministic backtest. We call backtest() to *run*
+    # the episode (it populates env.history), then recompute metrics on the
+    # net-of-cost value path so Sharpe is consistent with total_return.
     test_env = build_env(test_df)
-    oos_metrics = backtest(agent, test_env, normalizer=normalizer)
+    backtest(agent, test_env, normalizer=normalizer)
+    oos_metrics = _net_metrics(test_env)
     oos_diag = diag.policy_diagnostics(test_env)
     agent_ret = _agent_return_series(test_env)
 
     # In-sample (train) deterministic backtest — for the IS/OOS reconciliation
     is_env = build_env(train_df)
-    is_metrics = backtest(agent, is_env, normalizer=normalizer)
+    backtest(agent, is_env, normalizer=normalizer)
+    is_metrics = _net_metrics(is_env)
     is_diag = diag.policy_diagnostics(is_env)
 
     # Reconcile total_return vs ann_return on the OOS path
@@ -116,7 +144,8 @@ def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
     # Headline per-seed record (value-path / net-of-cost metrics)
     record = {
         "seed": int(seed),
-        "sharpe": oos_metrics["sharpe"],
+        "sharpe": oos_metrics["sharpe"],                 # net of cost (honest)
+        "gross_sharpe": oos_metrics["gross_sharpe"],     # before cost — gap = cost impact
         "sortino": oos_metrics["sortino"],
         "calmar": oos_metrics["calmar"],
         "max_drawdown": oos_metrics["max_drawdown"],
@@ -131,6 +160,7 @@ def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
         "mean_active_share": oos_diag["mean_active_share"],
         "near_uniform": oos_diag["near_uniform"],
         "is_sharpe": is_metrics["sharpe"],
+        "is_gross_sharpe": is_metrics["gross_sharpe"],
         "is_total_return": is_metrics["total_return"],
         "final_alpha": logs[-1].get("alpha") if logs else None,
         "final_policy_entropy": logs[-1].get("policy_entropy") if logs else None,
@@ -284,8 +314,8 @@ def main():
               f"active {rec['mean_active_share']:.3f} | near_uniform={rec['near_uniform']}")
 
     # ── Aggregate ────────────────────────────────────────────────────────────────
-    agg_keys = ["sharpe", "sortino", "calmar", "max_drawdown", "total_return",
-                "ann_return_geom", "ann_volatility", "win_rate",
+    agg_keys = ["sharpe", "gross_sharpe", "sortino", "calmar", "max_drawdown",
+                "total_return", "ann_return_geom", "ann_volatility", "win_rate",
                 "mean_turnover", "mean_hhi", "mean_active_share", "is_sharpe"]
     agg = diag.aggregate_metrics(per_seed_records, keys=agg_keys,
                                  n_boot=args.bootstrap, seed=0)
@@ -308,6 +338,15 @@ def main():
         json.dump(significance, f, indent=2, default=str)
     with open(os.path.join(args.out, "baselines.json"), "w") as f:
         json.dump(baselines, f, indent=2, default=str)
+    # Per-seed net return series + equal-weight, so metrics/significance can be
+    # recomputed offline (no retraining needed).
+    np.savez(
+        os.path.join(args.out, "per_seed_returns.npz"),
+        equal_weight=ew_ret.values,
+        ew_dates=ew_ret.index.values.astype("datetime64[D]"),
+        **{f"seed_{r['seed']}": ex["agent_ret"].values
+           for r, ex in zip(per_seed_records, per_seed_extras)},
+    )
     write_run_meta(args.out, seed=args.seeds[0], config=config, device=str(),
                    mode="multi_seed_evaluate", seeds=args.seeds, episodes=args.episodes,
                    encoder=args.encoder, n_trials=args.n_trials)
@@ -340,8 +379,18 @@ def main():
     print(f"    Per-seed JK: median p = {psum['median_p']}, "
           f"frac significant = {psum['frac_significant_5pct']}")
 
+    # Transaction-cost impact: gross (pre-cost) vs net (post-cost) Sharpe.
+    if "gross_sharpe" in agg and "sharpe" in agg:
+        g, nsh = agg["gross_sharpe"]["mean"], agg["sharpe"]["mean"]
+        print("\n  Transaction-cost impact on Sharpe:")
+        print(f"    gross (pre-cost) Sharpe = {g:+.3f}  →  net (post-cost) Sharpe = {nsh:+.3f}  "
+              f"(cost drag {g - nsh:+.3f})")
+        if g > 0 and nsh < g - 0.3:
+            print("    → Costs, driven by high turnover, are the dominant drag on performance.")
+
     near_uniform_frac = np.mean([r["near_uniform"] for r in per_seed_records])
     print(f"\n  Policy: mean active share = {agg['mean_active_share']['mean']:.3f}, "
+          f"mean turnover = {agg['mean_turnover']['mean']:.3f}/step, "
           f"near-uniform in {near_uniform_frac:.0%} of seeds.")
     if near_uniform_frac >= 0.5:
         print("    → The learned policy is approximately equal-weight; this plainly")

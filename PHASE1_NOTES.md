@@ -66,6 +66,20 @@ included, `ann_return_geom_net` = the honest annualized figure consistent with
 agent's metrics and for the significance test, so the agent is measured on the
 same basis as the baselines.
 
+**Net vs gross Sharpe (the same bug, in the Sharpe family).** The same
+gross-vs-net issue affects `sharpe`/`sortino`/`calmar`: the env's `backtest()`
+computes them from the *gross* return array, so when turnover (hence costs) is
+high the reported Sharpe is inflated. `_net_metrics()` recomputes the agent's
+Sharpe family from the net value path and additionally reports `gross_sharpe`,
+so the **gap between gross and net Sharpe is a direct read-out of the
+transaction-cost drag**. At 500 episodes the agent's gross Sharpe (~1.3) is
+respectable but its high turnover (~0.36/step) drags the *net* Sharpe negative —
+costs, not signal, are the binding constraint.
+
+Per-seed net return series (and the equal-weight series) are saved to
+`per_seed_returns.npz`, and per-seed normalizers to `checkpoints/`, so metrics
+and significance can be recomputed offline without retraining.
+
 ## Notes / assumptions
 
 - `--n-trials` (default 50) feeds the Deflated Sharpe haircut; set it to the
