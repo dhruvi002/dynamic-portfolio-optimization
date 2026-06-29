@@ -111,13 +111,49 @@ Runs deterministic rollout on held-out test data and prints full metrics table. 
 
 | Parameter | Value |
 |---|---|
-| Assets | 30 Dow Jones stocks |
-| Training period | Apr 2019 – Dec 2022 |
+| Assets | 24-name fixed neutral universe (see Phase 2 below) |
+| Training period | Apr 2019 – Dec 2021 (train) / 2022 (validation) |
 | Test period | Jan 2023 – Jan 2025 |
 | Transaction cost | 0.1% per turnover |
 | Slippage | 0.1% per turnover |
 | Initial capital | $1,000,000 |
 | Rebalancing | Daily |
+
+---
+
+## Phase 2 — Leakage removal (I-3, I-4)
+
+> The original headline ("+24% Sharpe") rested on a single unseeded backtest **with
+> two leaks**. Phases 0–1 made evaluation reproducible and CI/significance-backed;
+> Phase 2 removes the leaks so the numbers can be trusted, then re-runs the
+> unchanged Phase 1 harness. Results are being re-measured under the corrected
+> pipeline — treat the legacy "+24%" numbers above as superseded.
+
+**I-3 — HPO no longer sees the test set.** The Ray Tune trial path
+(`tuning/tune_runner.py`) previously trained and scored on the *entire*
+2019–2025 series (including the 2023–2025 test window), so the test set influenced
+the selected hyperparameters. Each trial now does a chronological
+`three_way_split`, trains on **train only**, and reports the **deterministic,
+net-of-cost validation Sharpe** as its objective — matching the metric the Phase 1
+harness reports. Trials are seeded for reproducibility, and a hard guard
+(`test/test_no_leak.py`) asserts no test-window row ever enters tuning. The old
+hyperparameters are archived at `tuning/best_config_LEAKED.json`.
+
+**I-4 — survivorship / look-ahead universe.** The universe was the *current*
+Dow-30 with Sherwin-Williams (SHW) back-filled to 2018; SHW only joined the DJIA
+in Nov 2024. The trading universe is now a **disclosed fixed neutral set**
+(`config.UNIVERSE`): the **24 names that were continuous DJIA members across the
+entire 2018-01 → 2025-01 window** — not the live DJ-30, and carrying no
+foreknowledge of index changes. Excluded mid-sample joiners/leavers:
+
+| Excluded | Reason |
+|---|---|
+| AMGN, CRM, HON | joined the DJIA 2020-08-31 (not members during 2019–mid-2020 training) |
+| DOW | joined 2019-04-02, removed 2024-11-08 (not continuous across the window) |
+| INTC | removed from the DJIA 2024-11-08 (not a member through the window end) |
+| SHW | joined the DJIA 2024-11-08 (back-filling to 2018 is look-ahead bias) |
+
+See `PHASE2_NOTES.md` for the full rationale and the re-measurement procedure.
 
 ---
 

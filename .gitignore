@@ -14,6 +14,16 @@ modularization-demo/
 # Ray Tune results
 ray_results/
 
+# Run artifacts (regenerated each run — don't commit the large binaries).
+# Commit source + the small JSON/CSV/PNG summaries explicitly if you want them.
+checkpoints/
+runs/
+plots/
+experiments/results/checkpoints/
+experiments/results/*.npz
+*.pt
+*.pkl
+
 # Conda
 .conda/
 

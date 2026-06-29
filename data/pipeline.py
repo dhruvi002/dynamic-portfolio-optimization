@@ -13,11 +13,12 @@ from typing import Tuple
 import warnings
 warnings.filterwarnings("ignore")
 
-DJ30_TICKERS = [
-    "AAPL", "AMGN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS", "DOW",
-    "GS", "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD", "MMM",
-    "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "V", "VZ", "SHW", "WMT",
-]  # WBA delisted -> replaced with SHW (Sherwin-Williams)
+from config import UNIVERSE
+
+# Leak-free trading universe (Phase 2, I-4). Single source of truth is
+# config.UNIVERSE; DJ30_TICKERS is kept as a backward-compatible alias and now
+# resolves to the continuous-membership universe (no survivorship/look-ahead).
+DJ30_TICKERS = list(UNIVERSE)
 
 INDICATORS = ["macd", "rsi_30", "cci_30", "dx_30"]
 

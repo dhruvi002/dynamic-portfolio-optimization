@@ -22,15 +22,19 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
+from config import UNIVERSE
+
 
 class PortfolioEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
-    DJ30_TICKERS = [
-        "AAPL", "AMGN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS", "DOW",
-        "GS", "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD", "MMM",
-        "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "V", "VZ", "SHW", "WMT",
-    ]  # WBA delisted → replaced with SHW (Sherwin-Williams)
+    # Leak-free trading universe (Phase 2, I-4). Single source of truth is
+    # config.UNIVERSE — a fixed set of continuous Dow-30 members across the
+    # 2018–2025 window, NOT the live DJ-30 (no survivorship/look-ahead bias).
+    UNIVERSE = list(UNIVERSE)
+    # Backward-compatible alias so existing references keep working; it now
+    # resolves to the leak-free universe rather than the old back-filled DJ-30.
+    DJ30_TICKERS = UNIVERSE
 
     def __init__(
         self,
@@ -47,7 +51,7 @@ class PortfolioEnv(gym.Env):
     ):
         super().__init__()
 
-        self.tickers = tickers or self.DJ30_TICKERS
+        self.tickers = tickers or self.UNIVERSE
         self.n_assets = len(self.tickers)
         self.tech_indicators = tech_indicators or ["macd", "rsi_30", "cci_30", "dx_30"]
         self.n_tech = len(self.tech_indicators)

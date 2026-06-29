@@ -34,11 +34,10 @@ Output sentiment_score: float ∈ (-1, 1)  (positive→+, negative→−, neutra
 import os
 import pandas as pd
 
-DJ30_TICKERS = [
-    "AAPL", "AMGN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS", "DOW",
-    "GS", "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD", "MMM",
-    "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "V", "VZ", "SHW", "WMT",
-]
+from config import UNIVERSE
+
+# Aligned with the leak-free trading universe (Phase 2, I-4).
+DJ30_TICKERS = list(UNIVERSE)
 
 
 def _label_to_score(label: str, score: float) -> float:

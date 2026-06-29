@@ -19,40 +19,112 @@ Usage:
 """
 
 import os
-import ray
-from ray import tune
-from ray.tune.schedulers import ASHAScheduler
-from ray.tune.search.hyperopt import HyperOptSearch
-from hyperopt import hp
 import numpy as np
 
+# NOTE: ray / ray.tune AND hyperopt are imported lazily (inside run_tune(),
+# _train_trial(), and _build_search_space()) so this module — and its leak-free
+# trial helpers — can be imported for unit testing without a full Ray/HyperOpt
+# install (and without tripping hyperopt's pkg_resources/setuptools dependency).
+# See test/test_no_leak.py.
+
 # Lazy imports to avoid circular deps
-def _train_trial(config: dict):
-    """Single Ray Tune trial: train SAC and report Sharpe ratio."""
+def _build_trial_envs(config: dict):
+    """
+    Build the train and validation environments for one HPO trial — **never the
+    test set**.  (Phase 2, I-3: kill the HPO test-set leak.)
+
+    The old code loaded the *entire* processed dataset (2019 → 2025, INCLUDING the
+    2023–2025 test window), built ONE env over the whole series, and reported the
+    objective on that same series — so the test set influenced the hyperparameters.
+    Here we chronologically split with the canonical `config.py` windows and build:
+      • a TRAIN env on  [TRAIN_START, TRAIN_PROPER_END]
+      • a VAL   env on  [VAL_START,   TRAIN_END]
+    and hard-assert that neither env contains a single test-window row.
+    """
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     import pandas as pd
-    from agent.sac import SACAgent
+    from config import (TRAIN_START, TRAIN_PROPER_END, VAL_START,
+                        TRAIN_END, TEST_START, TEST_END)
+    from data.pipeline import three_way_split
     from environment.portfolio_env import PortfolioEnv
-    from utils.metrics import compute_sharpe
 
     # Load pre-built dataset (must exist before running tune)
     try:
         df = pd.read_parquet("data/processed_data.parquet")
     except FileNotFoundError:
-        # Fallback: generate synthetic data for testing
+        # Fallback: synthetic data spanning train+val+test for CI/testing
         df = _synthetic_df()
 
-    env = PortfolioEnv(
+    train_df, val_df, _test_df = three_way_split(
         df,
-        transaction_cost_rate=config.get("tc_rate", 0.001),
-        slippage_rate=config.get("slip_rate", 0.001),
+        train_start=TRAIN_START, train_end=TRAIN_PROPER_END,
+        val_start=VAL_START,     val_end=TRAIN_END,
+        test_start=TEST_START,   test_end=TEST_END,
     )
 
+    tc = config.get("tc_rate", 0.001)
+    slip = config.get("slip_rate", 0.001)
+    train_env = PortfolioEnv(train_df, transaction_cost_rate=tc, slippage_rate=slip)
+    val_env   = PortfolioEnv(val_df,   transaction_cost_rate=tc, slippage_rate=slip)
+
+    # ── Hard leakage guard: no env may touch the test window ────────────────────
+    test_lo, test_hi = pd.Timestamp(TEST_START), pd.Timestamp(TEST_END)
+    train_end_ts = pd.Timestamp(TRAIN_END)
+    for name, e in (("train", train_env), ("val", val_env)):
+        max_date = pd.Timestamp(max(e.dates))
+        if max_date > train_end_ts:
+            raise AssertionError(
+                f"HPO LEAK GUARD: {name} env max date {max_date.date()} > TRAIN_END "
+                f"{train_end_ts.date()} — test-window rows leaked into tuning."
+            )
+        if any(test_lo <= pd.Timestamp(d) <= test_hi for d in e.dates):
+            raise AssertionError(
+                f"HPO LEAK GUARD: {name} env contains dates in the test window "
+                f"[{TEST_START}, {TEST_END}]."
+            )
+    return train_env, val_env
+
+
+def _val_net_sharpe(agent, val_env, normalizer) -> float:
+    """
+    Deterministic NET-of-cost validation Sharpe — the HPO objective.
+
+    Matches the Phase 1 "net Sharpe" definition (`experiments/multi_seed._net_metrics`)
+    so HPO optimizes the exact metric we report: run a deterministic backtest on the
+    val env (normalizer frozen), then compute the Sharpe of the value-path returns
+    (which include transaction + slippage costs), not the env's gross return array.
+    """
+    from utils.trainer import backtest
+    from utils.diagnostics import returns_from_values
+    from utils.metrics import compute_sharpe
+
+    backtest(agent, val_env, normalizer=normalizer)   # populates val_env.history
+    pv = np.asarray(val_env.history["portfolio_value"], dtype=float)
+    net_returns = returns_from_values(pv)
+    return float(compute_sharpe(net_returns))
+
+
+def _train_trial(config: dict):
+    """Single Ray Tune trial: train SAC on TRAIN only, report NET val Sharpe."""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from ray import tune
+    from agent.sac import SACAgent
+    from utils.seeding import set_global_seed
+    from utils.trainer import train
+    from utils.normalizer import RunningNormalizer
+
+    # ── Reproducible HPO: seed every trial (Phase 2, I-3) ───────────────────────
+    set_global_seed(int(config.get("seed", 42)))
+
+    train_env, val_env = _build_trial_envs(config)
+
     agent = SACAgent(
-        state_dim=env.state_dim,
-        action_dim=env.action_dim,
+        state_dim=train_env.state_dim,
+        action_dim=train_env.action_dim,
         gamma=config["gamma"],
         tau=config["tau"],
         lr_actor=config["lr_actor"],
@@ -62,45 +134,37 @@ def _train_trial(config: dict):
         hidden_sizes=[int(config["hidden_size"])] * 2,
     )
 
-    # Warm-up: fill buffer with random actions
-    state, _ = env.reset()
-    for _ in range(min(1000, len(env.dates) - 1)):
-        action = env.action_space.sample()
-        next_state, reward, done, _, _ = env.step(action)
-        agent.replay_buffer.push(state, action, reward, next_state, float(done))
-        state = next_state if not done else env.reset()[0]
+    # Normalizer: skip the first n_assets dims (weights already on the simplex).
+    normalizer = RunningNormalizer(train_env.state_dim, n_skip=train_env.n_assets)
 
-    # Training loop (shortened for HPO — full training in main.py)
-    n_episodes = config.get("tune_episodes", 10)
-    portfolio_returns = []
+    # Short training run on TRAIN ONLY (full training lives in main.py).
+    n_episodes = int(config.get("tune_episodes", 15))
+    train(
+        agent, train_env,
+        n_episodes=n_episodes,
+        warmup_steps=min(1000, len(train_env.dates) - 1),
+        normalizer=normalizer,
+        val_env=None,            # objective is computed once below, net of cost
+        seed=int(config.get("seed", 42)),
+    )
 
-    for ep in range(n_episodes):
-        state, _ = env.reset()
-        ep_returns = []
-        done = False
+    # Objective: deterministic, net-of-cost VALIDATION Sharpe (no test leakage).
+    val_sharpe = _val_net_sharpe(agent, val_env, normalizer)
 
-        while not done:
-            action = agent.select_action(state)
-            next_state, reward, done, _, info = env.step(action)
-            agent.replay_buffer.push(state, action, reward, next_state, float(done))
-            agent.update()
-            ep_returns.append(info["port_return"])
-            state = next_state
-
-        portfolio_returns.extend(ep_returns)
-
-    sharpe = compute_sharpe(np.array(portfolio_returns))
-
-    tune.report({"sharpe": sharpe, "mean_return": float(np.mean(portfolio_returns))})
+    tune.report({"val_sharpe": val_sharpe})
 
 
 def _synthetic_df():
-    """Generate minimal synthetic data for CI/testing."""
+    """
+    Minimal synthetic data for CI/testing — spans train+val+test so the
+    three-way split and the leakage guard have rows to exercise.
+    """
     import pandas as pd
+    from config import DOWNLOAD_START, TEST_END
     from environment.portfolio_env import PortfolioEnv
 
-    tickers = PortfolioEnv.DJ30_TICKERS
-    dates = pd.date_range("2020-01-01", periods=252, freq="B")
+    tickers = PortfolioEnv.UNIVERSE
+    dates = pd.date_range(DOWNLOAD_START, TEST_END, freq="B")
     rows = []
     prices = np.ones(len(tickers)) * 100.0
     for date in dates:
@@ -121,16 +185,24 @@ def _synthetic_df():
 
 # ─── Search space ──────────────────────────────────────────────────────────────
 
-SEARCH_SPACE = {
-    "gamma":       hp.uniform("gamma", 0.95, 0.999),
-    "tau":         hp.loguniform("tau", np.log(1e-4), np.log(1e-2)),
-    "lr_actor":    hp.loguniform("lr_actor", np.log(1e-5), np.log(1e-3)),
-    "lr_critic":   hp.loguniform("lr_critic", np.log(1e-5), np.log(1e-3)),
-    "lr_alpha":    hp.loguniform("lr_alpha", np.log(1e-5), np.log(1e-3)),
-    "batch_size":  hp.choice("batch_size", [128, 256, 512]),
-    "hidden_size": hp.choice("hidden_size", [128, 256, 512]),
-    "tune_episodes": 15,  # fixed, short for HPO
-}
+def _build_search_space() -> dict:
+    """HyperOpt search space (built lazily so importing this module needs no hyperopt)."""
+    from hyperopt import hp
+    return {
+        "gamma":       hp.uniform("gamma", 0.95, 0.999),
+        "tau":         hp.loguniform("tau", np.log(1e-4), np.log(1e-2)),
+        "lr_actor":    hp.loguniform("lr_actor", np.log(1e-5), np.log(1e-3)),
+        "lr_critic":   hp.loguniform("lr_critic", np.log(1e-5), np.log(1e-3)),
+        "lr_alpha":    hp.loguniform("lr_alpha", np.log(1e-5), np.log(1e-3)),
+        "batch_size":  hp.choice("batch_size", [128, 256, 512]),
+        "hidden_size": hp.choice("hidden_size", [128, 256, 512]),
+        "tune_episodes": 15,  # fixed, short for HPO
+        "seed": 42,           # fixed seed → reproducible trials (Phase 2, I-3)
+    }
+
+# Ray Tune metric the scheduler/search optimize: the deterministic, net-of-cost
+# VALIDATION Sharpe (Phase 2). Never the test set.
+TUNE_METRIC = "val_sharpe"
 
 
 def run_tune(
@@ -142,6 +214,11 @@ def run_tune(
 ):
     """Launch Ray Tune HPO sweep."""
     import os
+    import ray
+    from ray import tune
+    from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.search.hyperopt import HyperOptSearch
+
     if storage_path is None:
         storage_path = os.path.abspath("ray_results")
     os.makedirs(storage_path, exist_ok=True)
@@ -149,7 +226,7 @@ def run_tune(
     ray.init(ignore_reinit_error=True)
 
     scheduler = ASHAScheduler(
-        metric="sharpe",
+        metric=TUNE_METRIC,
         mode="max",
         max_t=20,           # max epochs per trial before pruning
         grace_period=3,     # min epochs before pruning
@@ -157,8 +234,8 @@ def run_tune(
     )
 
     search_alg = HyperOptSearch(
-        space=SEARCH_SPACE,
-        metric="sharpe",
+        space=_build_search_space(),
+        metric=TUNE_METRIC,
         mode="max",
         n_initial_points=10,   # random exploration before TPE kicks in
     )
@@ -180,12 +257,12 @@ def run_tune(
     )
 
     results = tuner.fit()
-    best = results.get_best_result(metric="sharpe", mode="max")
+    best = results.get_best_result(metric=TUNE_METRIC, mode="max")
 
     print("\n" + "═" * 60)
-    print("  Best trial:")
-    print(f"  Sharpe:  {best.metrics['sharpe']:.4f}")
-    print(f"  Config:  {best.config}")
+    print("  Best trial (objective = net-of-cost VALIDATION Sharpe, no leak):")
+    print(f"  Val Sharpe:  {best.metrics[TUNE_METRIC]:.4f}")
+    print(f"  Config:      {best.config}")
     print("═" * 60 + "\n")
 
     return best.config
