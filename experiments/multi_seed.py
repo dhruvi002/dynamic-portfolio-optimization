@@ -218,16 +218,27 @@ def run_significance(per_seed_extras, ew_ret, per_seed_records, args):
     )
 
     p_vals = [r["p_value"] for r in per_seed_jk if "p_value" in r]
+    diffs = [r["sharpe_diff_annual"] for r in per_seed_jk if "sharpe_diff_annual" in r]
+    n_sig = sum(1 for p in p_vals if p < 0.05)
     return {
         "n_obs_aligned": int(agent_mean.size),
-        "jobson_korkie_memmel_pooled": jk_main,
+        # Per-seed is the PRIMARY significance statement: each seed is a genuine,
+        # independent track record of full test length.
+        "per_seed_jk": per_seed_jk,
+        "per_seed_summary": {
+            "n_seeds": len(per_seed_jk),
+            "mean_sharpe_diff_annual": float(np.mean(diffs)) if diffs else None,
+            "std_sharpe_diff_annual": float(np.std(diffs, ddof=0)) if diffs else None,
+            "median_p": float(np.median(p_vals)) if p_vals else None,
+            "n_significant_5pct": int(n_sig),
+            "frac_significant_5pct": float(n_sig / len(p_vals)) if p_vals else None,
+        },
+        # Pooled test on the cross-seed-AVERAGED series is an OPTIMISTIC
+        # cross-check only: averaging shrinks the SE and overstates the z-stat,
+        # so it must not be quoted as the headline p-value.
+        "jobson_korkie_memmel_pooled_optimistic": jk_main,
         "bootstrap_sharpe_diff": boot,
         "deflated_sharpe_ratio": dsr,
-        "per_seed_jk": per_seed_jk,
-        "per_seed_p_summary": {
-            "median_p": float(np.median(p_vals)) if p_vals else None,
-            "frac_significant_5pct": float(np.mean([p < 0.05 for p in p_vals])) if p_vals else None,
-        },
     }
 
 
@@ -364,20 +375,23 @@ def main():
         print(f"    {name:<16} Sharpe {m.get('sharpe', float('nan')):.3f} | "
               f"total_return {m.get('total_return', float('nan')):+.2%}")
 
-    jk = significance["jobson_korkie_memmel_pooled"]
+    jk = significance["jobson_korkie_memmel_pooled_optimistic"]
     boot = significance["bootstrap_sharpe_diff"]
     dsr = significance["deflated_sharpe_ratio"]
+    psum = significance["per_seed_summary"]
     print("\n  Significance — SAC minus Equal-Weight Sharpe:")
-    print(f"    Jobson–Korkie (Memmel): ΔSharpe(annual) = {jk['sharpe_diff_annual']:+.3f}, "
-          f"z = {jk['z_stat']:+.3f}, p = {jk['p_value']:.4f} "
-          f"→ {'SIGNIFICANT' if jk['significant_5pct'] else 'NOT significant'} at 5%")
-    print(f"    Bootstrap 95% CI on ΔSharpe(annual): "
-          f"[{boot['ci_annual'][0]:+.3f}, {boot['ci_annual'][1]:+.3f}]  "
-          f"(p_boot = {boot['p_value_bootstrap']:.4f}, excludes 0: {boot['ci_excludes_zero']})")
+    print("    PRIMARY (per-seed Jobson–Korkie, Memmel — each seed a full-length record):")
+    print(f"      {psum['n_significant_5pct']}/{psum['n_seeds']} seeds significant at 5% "
+          f"(median p = {psum['median_p']:.2e})")
+    print(f"      ΔSharpe(annual) across seeds = {psum['mean_sharpe_diff_annual']:+.3f} "
+          f"± {psum['std_sharpe_diff_annual']:.3f}")
     print(f"    Deflated Sharpe Ratio (n_trials={dsr['n_trials']}): DSR = {dsr['dsr']:.4f}")
-    psum = significance["per_seed_p_summary"]
-    print(f"    Per-seed JK: median p = {psum['median_p']}, "
-          f"frac significant = {psum['frac_significant_5pct']}")
+    print("    Cross-checks (optimistic — averaging shrinks SE, do not quote as headline):")
+    print(f"      Pooled JK on mean series: ΔSharpe(annual) = {jk['sharpe_diff_annual']:+.3f}, "
+          f"z = {jk['z_stat']:+.3f}, p = {jk['p_value']:.2e}")
+    print(f"      Bootstrap 95% CI on ΔSharpe(annual): "
+          f"[{boot['ci_annual'][0]:+.3f}, {boot['ci_annual'][1]:+.3f}]  "
+          f"(excludes 0: {boot['ci_excludes_zero']})")
 
     # Transaction-cost impact: gross (pre-cost) vs net (post-cost) Sharpe.
     if "gross_sharpe" in agg and "sharpe" in agg:

@@ -84,9 +84,12 @@ and significance can be recomputed offline without retraining.
 
 - `--n-trials` (default 50) feeds the Deflated Sharpe haircut; set it to the
   true number of HPO configurations tried for an accurate deflation.
-- Significance uses the **across-seed mean** agent return series for the pooled
-  test, with per-seed JK tests reported alongside (median p, fraction
-  significant).
+- Significance is reported **per-seed first** (each seed is a genuine
+  full-length track record): the headline is "k/N seeds significant" plus the
+  mean ± std of ΔSharpe across seeds. The pooled Jobson–Korkie on the
+  cross-seed-**averaged** return series and the bootstrap CI are kept only as
+  *optimistic cross-checks* — averaging shrinks the standard error and overstates
+  the z-stat, so they must not be quoted as the headline p-value.
 - Phase 1 only **measures** the entropy collapse (α and policy entropy
   trajectories); changing the entropy mechanism is Phase 5.
 - Out of scope (unchanged): HPO test-set leak (I-3) and survivorship (I-4) →
