@@ -106,12 +106,15 @@ def _val_net_sharpe(agent, val_env, normalizer) -> float:
     return float(compute_sharpe(net_returns))
 
 
-def _train_trial(config: dict):
-    """Single Ray Tune trial: train SAC on TRAIN only, report NET val Sharpe."""
+def _run_one_trial(config: dict) -> float:
+    """
+    Train one short SAC trial on TRAIN ONLY and return its NET-of-cost VALIDATION
+    Sharpe. Shared by the Ray path (`_train_trial`) and the Ray-free path
+    (`run_tune_simple`) so both optimize the *identical*, leak-free objective.
+    """
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    from ray import tune
     from agent.sac import SACAgent
     from utils.seeding import set_global_seed
     from utils.trainer import train
@@ -149,9 +152,71 @@ def _train_trial(config: dict):
     )
 
     # Objective: deterministic, net-of-cost VALIDATION Sharpe (no test leakage).
-    val_sharpe = _val_net_sharpe(agent, val_env, normalizer)
+    return _val_net_sharpe(agent, val_env, normalizer)
 
+
+def _train_trial(config: dict):
+    """Ray Tune entry point: run one trial and report the NET val Sharpe."""
+    from ray import tune
+    val_sharpe = _run_one_trial(config)
     tune.report({"val_sharpe": val_sharpe})
+
+
+# ─── Ray-free HPO (fallback when Ray/Tune is unavailable in the env) ─────────────
+
+def _sample_config(rng) -> dict:
+    """
+    Sample one HP config — a numpy mirror of SEARCH_SPACE, so the random-search
+    HPO needs neither Ray nor HyperOpt. Reproducible via the passed RNG.
+    """
+    def loguniform(lo, hi):
+        return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
+    return {
+        "gamma":       float(rng.uniform(0.95, 0.999)),
+        "tau":         loguniform(1e-4, 1e-2),
+        "lr_actor":    loguniform(1e-5, 1e-3),
+        "lr_critic":   loguniform(1e-5, 1e-3),
+        "lr_alpha":    loguniform(1e-5, 1e-3),
+        "batch_size":  int(rng.choice([128, 256, 512])),
+        "hidden_size": int(rng.choice([128, 256, 512])),
+        "tune_episodes": 15,
+        "seed": 42,
+    }
+
+
+def run_tune_simple(num_samples: int = 50, search_seed: int = 0) -> dict:
+    """
+    Ray-free leak-free HPO: sequential random search over the same space, scoring
+    each trial by the deterministic NET-of-cost VALIDATION Sharpe (the identical
+    objective the Ray path uses). Produces the same `best_config.json`.
+
+    This exists because Ray 2.9.x is incompatible with current setuptools/pyarrow;
+    rather than pin a fragile dependency chain just to tune a tiny CPU model, we
+    run the search directly. Methodology is disclosed in PHASE2_NOTES.md.
+    """
+    print("═" * 60)
+    print(f"  HPO — Ray-free random search | {num_samples} trials")
+    print("  objective = net-of-cost VALIDATION Sharpe (never the test set)")
+    print("═" * 60)
+    rng = np.random.default_rng(search_seed)
+    best_cfg, best_score = None, -np.inf
+    for i in range(1, num_samples + 1):
+        cfg = _sample_config(rng)
+        try:
+            score = _run_one_trial(cfg)
+        except Exception as e:  # a bad HP combo shouldn't kill the whole sweep
+            print(f"  trial {i:3d}/{num_samples}: FAILED ({type(e).__name__}: {e})")
+            continue
+        flag = ""
+        if score > best_score:
+            best_score, best_cfg = score, cfg
+            flag = "  ← new best"
+        print(f"  trial {i:3d}/{num_samples}: val_sharpe={score:+.4f}{flag}")
+    print("─" * 60)
+    print(f"  Best val_sharpe = {best_score:+.4f}")
+    print(f"  Best config     = {best_cfg}")
+    print("═" * 60)
+    return best_cfg
 
 
 def _synthetic_df():
@@ -212,12 +277,20 @@ def run_tune(
     gpus_per_trial: float = 0.0,
     storage_path: str = None,
 ):
-    """Launch Ray Tune HPO sweep."""
+    """Launch the HPO sweep — Ray Tune if available, else Ray-free random search."""
     import os
-    import ray
-    from ray import tune
-    from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.search.hyperopt import HyperOptSearch
+
+    # Ray 2.9.x is fragile against current setuptools/pyarrow; if it (or HyperOpt)
+    # can't import, fall back to the leak-free random search rather than fail.
+    try:
+        import ray
+        from ray import tune
+        from ray.tune.schedulers import ASHAScheduler
+        from ray.tune.search.hyperopt import HyperOptSearch
+    except Exception as e:
+        print(f"  [tune] Ray/Tune unavailable ({type(e).__name__}: {e}).")
+        print("  [tune] Falling back to Ray-free random-search HPO (same objective).")
+        return run_tune_simple(num_samples=num_samples)
 
     if storage_path is None:
         storage_path = os.path.abspath("ray_results")

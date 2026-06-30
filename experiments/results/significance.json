@@ -1,0 +1,130 @@
+{
+  "n_obs_aligned": 543,
+  "per_seed_jk": [
+    {
+      "test": "Jobson-Korkie (Memmel correction)",
+      "n_obs": 543,
+      "sharpe_a_periodic": -0.03240217643156396,
+      "sharpe_b_periodic": 0.1024037467118457,
+      "sharpe_diff_periodic": -0.13480592314340967,
+      "correlation": 0.9130197610466763,
+      "z_stat": -7.353325393476666,
+      "p_value": 1.9340085088970227e-13,
+      "significant_5pct": true,
+      "sharpe_a_annual": -0.5143686046509393,
+      "sharpe_b_annual": 1.6256090827247522,
+      "sharpe_diff_annual": -2.1399776873756915,
+      "seed": 0
+    },
+    {
+      "test": "Jobson-Korkie (Memmel correction)",
+      "n_obs": 543,
+      "sharpe_a_periodic": -0.019994399863582785,
+      "sharpe_b_periodic": 0.1024037467118457,
+      "sharpe_diff_periodic": -0.12239814657542848,
+      "correlation": 0.9000102954280141,
+      "z_stat": -6.267647322571623,
+      "p_value": 3.6654368429367423e-10,
+      "significant_5pct": true,
+      "sharpe_a_annual": -0.31740125791814294,
+      "sharpe_b_annual": 1.6256090827247522,
+      "sharpe_diff_annual": -1.9430103406428951,
+      "seed": 1
+    },
+    {
+      "test": "Jobson-Korkie (Memmel correction)",
+      "n_obs": 543,
+      "sharpe_a_periodic": -0.024200384789215167,
+      "sharpe_b_periodic": 0.1024037467118457,
+      "sharpe_diff_periodic": -0.12660413150106087,
+      "correlation": 0.9116562712303172,
+      "z_stat": -6.872343857043936,
+      "p_value": 6.3156146978826655e-12,
+      "significant_5pct": true,
+      "sharpe_a_annual": -0.38416919870600164,
+      "sharpe_b_annual": 1.6256090827247522,
+      "sharpe_diff_annual": -2.0097782814307537,
+      "seed": 2
+    },
+    {
+      "test": "Jobson-Korkie (Memmel correction)",
+      "n_obs": 543,
+      "sharpe_a_periodic": 0.08784659922772799,
+      "sharpe_b_periodic": 0.1024037467118457,
+      "sharpe_diff_periodic": -0.01455714748411771,
+      "correlation": 0.9797421804512315,
+      "z_stat": -1.6756281205385017,
+      "p_value": 0.09381105714720706,
+      "significant_5pct": false,
+      "sharpe_a_annual": 1.394521530475962,
+      "sharpe_b_annual": 1.6256090827247522,
+      "sharpe_diff_annual": -0.23108755224879024,
+      "seed": 3
+    },
+    {
+      "test": "Jobson-Korkie (Memmel correction)",
+      "n_obs": 543,
+      "sharpe_a_periodic": -0.03658938731131016,
+      "sharpe_b_periodic": 0.1024037467118457,
+      "sharpe_diff_periodic": -0.13899313402315586,
+      "correlation": 0.860904227339568,
+      "z_stat": -6.047030989594919,
+      "p_value": 1.4753938071265793e-09,
+      "significant_5pct": true,
+      "sharpe_a_annual": -0.5808385166996938,
+      "sharpe_b_annual": 1.6256090827247522,
+      "sharpe_diff_annual": -2.206447599424446,
+      "seed": 4
+    }
+  ],
+  "per_seed_summary": {
+    "n_seeds": 5,
+    "mean_sharpe_diff_annual": -1.7060602922245152,
+    "std_sharpe_diff_annual": 0.7433177367863666,
+    "median_p": 3.6654368429367423e-10,
+    "n_significant_5pct": 4,
+    "frac_significant_5pct": 0.8
+  },
+  "jobson_korkie_memmel_pooled_optimistic": {
+    "test": "Jobson-Korkie (Memmel correction)",
+    "n_obs": 543,
+    "sharpe_a_periodic": -0.00717163310095786,
+    "sharpe_b_periodic": 0.1024037467118457,
+    "sharpe_diff_periodic": -0.10957537981280356,
+    "correlation": 0.9785647476538188,
+    "z_stat": -11.55348195763277,
+    "p_value": 0.0,
+    "significant_5pct": true,
+    "sharpe_a_annual": -0.11384614607600085,
+    "sharpe_b_annual": 1.6256090827247522,
+    "sharpe_diff_annual": -1.739455228800753
+  },
+  "bootstrap_sharpe_diff": {
+    "method": "stationary block bootstrap (Politis-Romano)",
+    "n_boot": 10000,
+    "avg_block": 10.0,
+    "alpha": 0.05,
+    "sharpe_diff_periodic": -0.10957537981280356,
+    "ci_periodic": [
+      -0.12878614486545054,
+      -0.09253903036475032
+    ],
+    "sharpe_diff_annual": -1.739455228800753,
+    "ci_annual": [
+      -2.0444166697483204,
+      -1.4690115654731049
+    ],
+    "p_value_bootstrap": 0.0,
+    "ci_excludes_zero": true
+  },
+  "deflated_sharpe_ratio": {
+    "metric": "Deflated Sharpe Ratio",
+    "sr_periodic": -0.00717163310095786,
+    "n_trials": 50,
+    "sr_trials_std": 0.04682461611047841,
+    "expected_max_sharpe_periodic": 0.10658701850050228,
+    "skew": -0.11992014129270445,
+    "kurtosis": 3.867915974608439,
+    "dsr": 0.004030623356710288
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "timestamp_utc": "2026-06-30T11:52:20.922392+00:00",
+  "git_sha": "6a6238cc7ec315b9a115e2c30010660d4b3321d0-dirty",
+  "seed": 0,
+  "config": {
+    "gamma": 0.989292148357197,
+    "tau": 0.007031699770378616,
+    "lr_actor": 3.406124707212943e-05,
+    "lr_critic": 0.00011963790935917404,
+    "lr_alpha": 7.682554643764796e-05,
+    "batch_size": 128,
+    "hidden_size": 512,
+    "buffer_size": 1000000,
+    "tune_episodes": 15,
+    "seed": 42
+  },
+  "device": "",
+  "python": "3.10.15",
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "library_versions": {
+    "torch": "2.2.2",
+    "numpy": "1.26.4",
+    "pandas": "2.2.2",
+    "gymnasium": "0.29.1",
+    "scikit-learn": null,
+    "yfinance": "1.5.1",
+    "finrl": null,
+    "ray": "2.9.3",
+    "transformers": "4.40.2",
+    "ta": "0.11.0"
+  },
+  "mode": "multi_seed_evaluate",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "episodes": 500,
+  "encoder": "mlp",
+  "n_trials": 50
+}

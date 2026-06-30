@@ -125,9 +125,13 @@ Runs deterministic rollout on held-out test data and prints full metrics table. 
 
 > The original headline ("+24% Sharpe") rested on a single unseeded backtest **with
 > two leaks**. Phases 0–1 made evaluation reproducible and CI/significance-backed;
-> Phase 2 removes the leaks so the numbers can be trusted, then re-runs the
-> unchanged Phase 1 harness. Results are being re-measured under the corrected
-> pipeline — treat the legacy "+24%" numbers above as superseded.
+> Phase 2 removes the leaks and re-runs the unchanged Phase 1 harness. **Leak-free
+> result (5 seeds × 500 ep):** net Sharpe **−0.08** [95% CI −0.52, +0.66] vs
+> Equal-Weight **1.63** — the agent **loses to equal-weight after costs**; 4/5
+> seeds significantly worse (median p ≈ 3.7e-10), Deflated Sharpe **0.004**. The
+> gross (pre-cost) Sharpe is +1.49 but a ~1.57 Sharpe transaction-cost drag at
+> 0.35/step turnover erases it. **Treat the legacy "+24%" numbers above as
+> superseded.** Full table and Phase 1→2 comparison in `PHASE2_NOTES.md`.
 
 **I-3 — HPO no longer sees the test set.** The Ray Tune trial path
 (`tuning/tune_runner.py`) previously trained and scored on the *entire*
