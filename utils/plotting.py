@@ -201,6 +201,54 @@ def plot_diagnostics_panel(
     return fig
 
 
+def plot_walk_forward_regimes(regime_agg: dict, save_path: str = None):
+    """
+    Per-regime NET Sharpe of the SAC agent vs the equal-weight baseline, with
+    bootstrap 95% CI error bars (Phase 3). `regime_agg` is
+    {regime: aggregate_metrics(...)} as produced by walk_forward_eval; each entry
+    must hold 'sharpe' and 'ew_sharpe' stats dicts with mean/ci_low/ci_high.
+    """
+    regimes = list(regime_agg.keys())
+    if not regimes:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.text(0.5, 0.5, "no regimes to plot", ha="center", va="center")
+        return fig
+
+    x = np.arange(len(regimes))
+    w = 0.38
+
+    def _series(key):
+        means, los, his = [], [], []
+        for rg in regimes:
+            s = regime_agg[rg].get(key, {})
+            m = s.get("mean", np.nan)
+            means.append(m)
+            los.append(m - s.get("ci_low", m))
+            his.append(s.get("ci_high", m) - m)
+        return np.array(means), np.abs(np.array([los, his]))
+
+    agent_m, agent_err = _series("sharpe")
+    ew_m, ew_err = _series("ew_sharpe")
+
+    fig, ax = plt.subplots(figsize=(max(8, 1.8 * len(regimes) + 4), 5))
+    ax.bar(x - w / 2, agent_m, w, yerr=agent_err, capsize=4,
+           color="steelblue", label="SAC agent (net)", alpha=0.9)
+    ax.bar(x + w / 2, ew_m, w, yerr=ew_err, capsize=4,
+           color="darkorange", label="Equal-weight (net)", alpha=0.9)
+    ax.axhline(0, color="black", lw=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(regimes, rotation=20, ha="right")
+    ax.set_ylabel("Annualized NET Sharpe")
+    ax.set_title("Walk-Forward: NET Sharpe by Market Regime (95% CI)",
+                 fontsize=13, fontweight="bold")
+    ax.legend()
+    ax.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def plot_weight_heatmap(weights_history: np.ndarray, tickers: list, save_path: str = None):
     """Heatmap of portfolio weights over time."""
     fig, ax = plt.subplots(figsize=(16, 6))

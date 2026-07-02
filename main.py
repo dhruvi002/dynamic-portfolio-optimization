@@ -253,6 +253,24 @@ def mode_tune(args):
     return best
 
 
+def mode_walkforward(args):
+    """Phase 3: multi-regime walk-forward evaluation (delegates to the harness)."""
+    print("=" * 60)
+    print("  MODE: WALK-FORWARD (Phase 3, multi-regime)")
+    print("=" * 60)
+    from experiments.walk_forward_eval import run_walk_forward_eval
+    run_walk_forward_eval(
+        seeds=args.wf_seeds,
+        folds=args.folds,
+        test_months=args.test_months,
+        min_train_months=args.min_train_months,
+        episodes=args.episodes,
+        warmup=1000,
+        config_path=args.config,
+        encoder=args.encoder,
+    )
+
+
 def mode_backtest(args, config: dict):
     print("=" * 60)
     print("  MODE: BACKTEST")
@@ -299,10 +317,17 @@ def mode_backtest(args, config: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Deep RL Portfolio Optimization")
-    parser.add_argument("--mode",           choices=["train", "tune", "backtest"], default="train")
+    parser.add_argument("--mode",           choices=["train", "tune", "backtest", "walkforward"], default="train")
     parser.add_argument("--seed",           type=int, default=42,
                         help="Global RNG seed for reproducible runs")
     parser.add_argument("--episodes",       type=int, default=100)
+    parser.add_argument("--wf-seeds",       type=int, nargs="+", default=[0, 1, 2], dest="wf_seeds",
+                        help="Seeds for walk-forward mode")
+    parser.add_argument("--folds",          type=int, default=9, help="Walk-forward folds")
+    parser.add_argument("--test-months",    type=int, default=6, dest="test_months",
+                        help="Walk-forward test window length (months)")
+    parser.add_argument("--min-train-months", type=int, default=12, dest="min_train_months",
+                        help="Months of data before the first walk-forward test window")
     parser.add_argument("--tune-samples",   type=int, default=50)
     parser.add_argument("--config",         type=str, default=None,
                         help="Path to JSON config (from Ray Tune or manual)")
@@ -333,6 +358,8 @@ def main():
         mode_train(args, config)
     elif args.mode == "backtest":
         mode_backtest(args, config)
+    elif args.mode == "walkforward":
+        mode_walkforward(args)
 
 
 if __name__ == "__main__":

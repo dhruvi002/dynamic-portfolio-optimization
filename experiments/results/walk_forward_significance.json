@@ -1,0 +1,70 @@
+{
+  "framing": "PRIMARY = per-(seed,fold) Jobson\u2013Korkie\u2013Memmel (each fold a full-length OOS record over its test window); pooled DSR is a multiple-testing cross-check. No SE-shrinking averaging.",
+  "per_regime": {
+    "COVID crash/recovery": {
+      "n_folds": 6,
+      "n_beat_equal_weight": 0,
+      "frac_beat_equal_weight": 0.0,
+      "n_jk_tests": 6,
+      "n_significant_5pct": 5,
+      "frac_significant_5pct": 0.8333333333333334,
+      "median_jk_p": 0.006056661726935086,
+      "mean_sharpe_diff_annual": -1.0931446741084005,
+      "std_sharpe_diff_annual": 0.5473843505541903
+    },
+    "2021 bull": {
+      "n_folds": 6,
+      "n_beat_equal_weight": 0,
+      "frac_beat_equal_weight": 0.0,
+      "n_jk_tests": 6,
+      "n_significant_5pct": 6,
+      "frac_significant_5pct": 1.0,
+      "median_jk_p": 3.2121567439258314e-06,
+      "mean_sharpe_diff_annual": -1.680148974490389,
+      "std_sharpe_diff_annual": 0.39350071215973914
+    },
+    "2022 bear (rate shock)": {
+      "n_folds": 6,
+      "n_beat_equal_weight": 0,
+      "frac_beat_equal_weight": 0.0,
+      "n_jk_tests": 6,
+      "n_significant_5pct": 6,
+      "frac_significant_5pct": 1.0,
+      "median_jk_p": 0.00017156125886053086,
+      "mean_sharpe_diff_annual": -1.4729012190700599,
+      "std_sharpe_diff_annual": 0.49127346761534685
+    },
+    "2023-24 recovery/AI": {
+      "n_folds": 9,
+      "n_beat_equal_weight": 0,
+      "frac_beat_equal_weight": 0.0,
+      "n_jk_tests": 9,
+      "n_significant_5pct": 8,
+      "frac_significant_5pct": 0.8888888888888888,
+      "median_jk_p": 4.838707704957201e-06,
+      "mean_sharpe_diff_annual": -2.509681299552257,
+      "std_sharpe_diff_annual": 0.7527796079306955
+    }
+  },
+  "overall": {
+    "n_folds": 27,
+    "n_beat_equal_weight": 0,
+    "frac_beat_equal_weight": 0.0,
+    "n_jk_tests": 27,
+    "n_significant_5pct": 25,
+    "frac_significant_5pct": 0.9259259259259259,
+    "median_jk_p": 0.00017470374361683305,
+    "mean_sharpe_diff_annual": -1.780159292666052,
+    "std_sharpe_diff_annual": 0.805610876057479
+  },
+  "deflated_sharpe_ratio": {
+    "metric": "Deflated Sharpe Ratio",
+    "sr_periodic": -0.024280823291035352,
+    "n_trials": 50,
+    "sr_trials_std": 0.09087652352429497,
+    "expected_max_sharpe_periodic": 0.2068625116176397,
+    "skew": 0.0,
+    "kurtosis": 3.0,
+    "dsr": 0.0044652541929121195
+  }
+}

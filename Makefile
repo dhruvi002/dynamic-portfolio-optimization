@@ -6,7 +6,13 @@ CONFIG ?= tuning/best_config.json
 
 SEEDS ?= 0 1 2 3 4
 
-.PHONY: help setup lock train backtest tune test repro evaluate clean
+WF_SEEDS ?= 0 1 2
+FOLDS ?= 9
+TEST_MONTHS ?= 6
+MIN_TRAIN_MONTHS ?= 12
+WF_EPISODES ?= 200
+
+.PHONY: help setup lock train backtest tune test repro evaluate walkforward clean
 
 help:
 	@echo "Targets:"
@@ -18,6 +24,7 @@ help:
 	@echo "  test      Run the pytest suite"
 	@echo "  repro     Train twice with the same seed and diff the logs"
 	@echo "  evaluate  Phase 1 multi-seed eval (SEEDS=$(SEEDS) EPISODES=$(EPISODES) CONFIG=$(CONFIG))"
+	@echo "  walkforward  Phase 3 walk-forward eval (WF_SEEDS=$(WF_SEEDS) FOLDS=$(FOLDS) TEST_MONTHS=$(TEST_MONTHS) MIN_TRAIN_MONTHS=$(MIN_TRAIN_MONTHS) WF_EPISODES=$(WF_EPISODES))"
 
 setup:
 	conda env create -f environment.yml || conda env update -f environment.yml
@@ -51,6 +58,12 @@ repro:
 # Phase 1: honest multi-seed evaluation with CIs, significance test, diagnostics.
 evaluate:
 	python experiments/multi_seed.py --seeds $(SEEDS) --episodes $(EPISODES) --config $(CONFIG)
+
+# Phase 3: multi-regime walk-forward evaluation (net-of-cost, per-regime CIs + JK).
+walkforward:
+	python experiments/walk_forward_eval.py --seeds $(WF_SEEDS) --folds $(FOLDS) \
+		--test-months $(TEST_MONTHS) --min-train-months $(MIN_TRAIN_MONTHS) \
+		--episodes $(WF_EPISODES) --config $(CONFIG)
 
 clean:
 	rm -rf __pycache__ */__pycache__ .pytest_cache

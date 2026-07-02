@@ -1,6 +1,6 @@
 {
-  "timestamp_utc": "2026-06-30T11:52:20.922392+00:00",
-  "git_sha": "6a6238cc7ec315b9a115e2c30010660d4b3321d0-dirty",
+  "timestamp_utc": "2026-07-02T04:22:57.597757+00:00",
+  "git_sha": "0f2daea75a9365156e2311f71e9b8c0c2f14d566-dirty",
   "seed": 0,
   "config": {
     "gamma": 0.989292148357197,
@@ -29,15 +29,15 @@
     "transformers": "4.40.2",
     "ta": "0.11.0"
   },
-  "mode": "multi_seed_evaluate",
+  "mode": "walk_forward_eval",
   "seeds": [
     0,
     1,
-    2,
-    3,
-    4
+    2
   ],
-  "episodes": 500,
-  "encoder": "mlp",
-  "n_trials": 50
+  "folds": 9,
+  "test_months": 6,
+  "min_train_months": 12,
+  "episodes": 200,
+  "encoder": "mlp"
 }
