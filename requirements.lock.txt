@@ -27,9 +27,9 @@ hyperopt==0.2.7
 idna==3.18
 iniconfig==2.3.0
 Jinja2==3.1.6
+joblib==1.5.3
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
-joblib==1.4.2
 kiwisolver==1.5.0
 lxml==6.1.1
 Markdown==3.10.2
@@ -65,7 +65,7 @@ requests==2.34.2
 rich==15.0.0
 rpds-py==0.30.0
 safetensors==0.8.0
-scikit-learn==1.4.2
+scikit-learn==1.7.2
 scipy==1.13.1
 seaborn==0.13.2
 six==1.17.0
@@ -75,7 +75,7 @@ ta==0.11.0
 tensorboard==2.16.2
 tensorboard-data-server==0.7.2
 tensorboardX==2.6.5
-threadpoolctl==3.5.0
+threadpoolctl==3.6.0
 tokenizers==0.19.1
 tomli==2.4.1
 torch==2.2.2
