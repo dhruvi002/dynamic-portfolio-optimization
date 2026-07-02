@@ -277,3 +277,176 @@ def max_sharpe_mvo(
     pivot = _pivot_prices(df, tickers)
     return _run_rebalancing(pivot, lambda d, p, w: target.copy(),
                             initial_capital, rebalance_freq, tc_rate, slip_rate)
+
+
+# ── Phase 4: strong baseline set (I-7) ─────────────────────────────────────────
+# Adds the standard benchmarks a practitioner would actually respect: SPY
+# buy-and-hold (the canonical market benchmark), a real 60/40 SPY/AGG balanced
+# portfolio, inverse-volatility risk parity, and rolling Ledoit-Wolf MVO — all
+# net of cost, same cost model, no look-ahead (estimators use only data with
+# date <= rebalance date).
+
+def spy_buy_and_hold(
+    start: str,
+    end: str,
+    initial_capital: float = 1e6,
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """
+    Single-asset SPY buy-and-hold. Enters the full position once at t0 (paying
+    the entry turnover cost, Σ|Δw| = 1, exactly like PortfolioEnv), then holds
+    with no further rebalancing — the canonical market benchmark. Downloads SPY
+    from yfinance for [start, end].
+    Returns (metrics_dict, portfolio_values, dates).
+    """
+    import yfinance as yf
+
+    raw = yf.download("SPY", start=start, end=end, auto_adjust=True, progress=False)["Close"]
+    raw = raw.dropna()
+    raw.index = pd.to_datetime(raw.index)
+    raw = raw.sort_index()
+    prices = np.asarray(raw.values, dtype=float).flatten()
+    dates = list(raw.index)
+
+    entry_cost = (tc_rate + slip_rate) * 1.0 * initial_capital
+    capital_after_entry = initial_capital - entry_cost
+    shares = capital_after_entry / (prices[0] + 1e-12)
+    values = shares * prices  # no further costs — pure buy-and-hold value path
+
+    returns = np.diff(values) / (values[:-1] + 1e-10)
+    return compute_all_metrics(returns, values), values, dates
+
+
+def spy_agg_60_40(
+    start: str,
+    end: str,
+    weight_spy: float = 0.6,
+    weight_agg: float = 0.4,
+    initial_capital: float = 1e6,
+    rebalance_freq: str = "ME",
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """
+    The classic 60/40 balanced benchmark: 60% SPY / 40% AGG (US aggregate
+    bonds), monthly rebalance, transaction costs. This — not `spy_qqq` (two
+    tech-heavy equity ETFs) — is what "60/40" means in practice. Downloads
+    SPY+AGG from yfinance for [start, end].
+    Returns (metrics_dict, portfolio_values, dates).
+    """
+    import yfinance as yf
+
+    raw = yf.download(["SPY", "AGG"], start=start, end=end, auto_adjust=True,
+                      progress=False, multi_level_index=True)["Close"]
+    raw = raw[["SPY", "AGG"]].dropna()
+    raw.index = pd.to_datetime(raw.index)
+    raw = raw.sort_index()
+
+    target = np.array([weight_spy, weight_agg])
+    return _run_rebalancing(raw, lambda d, p, w: target.copy(),
+                            initial_capital, rebalance_freq, tc_rate, slip_rate)
+
+
+def _inverse_vol_weights(returns_window: pd.DataFrame, n: int) -> np.ndarray:
+    """Inverse-volatility weights (simple risk-parity approximation)."""
+    if len(returns_window) < 5:
+        return np.ones(n) / n
+    vol = returns_window.std().values
+    inv_vol = 1.0 / (vol + 1e-8)
+    w = inv_vol / inv_vol.sum()
+    return w
+
+
+def risk_parity(
+    df: pd.DataFrame,
+    tickers: List[str],
+    train_df: Optional[pd.DataFrame] = None,
+    initial_capital: float = 1e6,
+    rebalance_freq: str = "ME",
+    lookback: int = 252,
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """
+    Inverse-volatility risk-parity weights over the universe, re-estimated at
+    each rebalance from a trailing `lookback`-day window of data available up
+    to that date (no look-ahead). `train_df`, if given, supplies history for
+    the lookback warmup before the test period starts (mirrors min_variance's
+    train_df pattern) — estimation still never uses a date after the rebalance.
+    Returns (metrics_dict, portfolio_values, dates).
+    """
+    hist_df = pd.concat([train_df, df], ignore_index=True) if train_df is not None else df
+    hist_pivot = _pivot_prices(hist_df, tickers).dropna()
+    pivot = _pivot_prices(df, tickers)
+    n = len(pivot.columns)
+
+    def target_fn(date, _pivot_slice, old_weights):
+        past = hist_pivot[hist_pivot.index <= date]
+        if len(past) < 20:
+            return np.ones(n) / n
+        window = past.iloc[-lookback:]
+        rets = window.pct_change().dropna()
+        return _inverse_vol_weights(rets, n)
+
+    return _run_rebalancing(pivot, target_fn, initial_capital, rebalance_freq, tc_rate, slip_rate)
+
+
+def _shrunk_covariance(returns_window: pd.DataFrame) -> np.ndarray:
+    """Ledoit-Wolf shrunk covariance; falls back to sample covariance if
+    scikit-learn is not installed (guarded, lazy import — mirrors the Ray
+    fallback pattern elsewhere in this codebase)."""
+    try:
+        from sklearn.covariance import LedoitWolf
+        lw = LedoitWolf().fit(returns_window.values)
+        return lw.covariance_
+    except ImportError:
+        print("  WARNING: scikit-learn not installed; rolling_mvo_ledoit_wolf "
+              "falling back to sample covariance (no shrinkage). "
+              "`pip install scikit-learn` for the intended estimator.")
+        return returns_window.cov().values
+
+
+def rolling_mvo_ledoit_wolf(
+    df: pd.DataFrame,
+    tickers: List[str],
+    kind: str = "min_var",
+    train_df: Optional[pd.DataFrame] = None,
+    initial_capital: float = 1e6,
+    rebalance_freq: str = "ME",
+    lookback: int = 252,
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """
+    "MVO done properly": mean-variance optimization with Ledoit-Wolf shrinkage,
+    RE-ESTIMATED at each rebalance on a trailing `lookback`-day window (rolling,
+    not static like `min_variance`/`max_sharpe_mvo`). Long-only, weights sum to
+    1. `kind` selects `_min_variance_weights` or `_max_sharpe_weights` fed the
+    shrunk covariance / rolling mean. No look-ahead: estimation at rebalance
+    date t uses only data with date <= t.
+    Returns (metrics_dict, portfolio_values, dates).
+    """
+    if kind not in ("min_var", "max_sharpe"):
+        raise ValueError(f"kind must be 'min_var' or 'max_sharpe', got {kind!r}")
+
+    hist_df = pd.concat([train_df, df], ignore_index=True) if train_df is not None else df
+    hist_pivot = _pivot_prices(hist_df, tickers).dropna()
+    pivot = _pivot_prices(df, tickers)
+    n = len(pivot.columns)
+
+    def target_fn(date, _pivot_slice, old_weights):
+        past = hist_pivot[hist_pivot.index <= date]
+        if len(past) < 20:
+            return np.ones(n) / n
+        window = past.iloc[-lookback:]
+        rets = window.pct_change().dropna()
+        if len(rets) < 5:
+            return np.ones(n) / n
+        cov = _shrunk_covariance(rets)
+        if kind == "min_var":
+            return _min_variance_weights(cov)
+        mean_ret = rets.mean().values
+        return _max_sharpe_weights(mean_ret, cov)
+
+    return _run_rebalancing(pivot, target_fn, initial_capital, rebalance_freq, tc_rate, slip_rate)

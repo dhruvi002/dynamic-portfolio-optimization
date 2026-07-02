@@ -95,38 +95,48 @@ def _load_data(data_path: str) -> pd.DataFrame:
 
 # ─── Modes ────────────────────────────────────────────────────────────────────
 
-def _collect_baselines(test_df: pd.DataFrame, train_df: pd.DataFrame) -> dict:
-    """Run all baseline strategies and return {name: metrics_dict}."""
-    from utils.baselines import equal_weight, spy_qqq, momentum_12_1, min_variance, max_sharpe_mvo
+def _collect_baselines_full(test_df: pd.DataFrame, train_df: pd.DataFrame) -> dict:
+    """
+    Run all baseline strategies and return {name: (metrics_dict, values, dates)}.
+
+    Phase 4 (I-7): the strong baseline set — equal-weight, momentum, static MVO
+    (kept for backward-compat / "static MVO" contrast) PLUS the standard
+    benchmarks a practitioner would respect: SPY buy-and-hold, the real 60/40
+    SPY/AGG balanced portfolio, inverse-vol risk parity, and rolling
+    Ledoit-Wolf MVO (min-var + max-Sharpe) — all net of cost, no look-ahead.
+    """
+    from utils.baselines import (
+        equal_weight, spy_qqq, momentum_12_1, min_variance, max_sharpe_mvo,
+        spy_buy_and_hold, spy_agg_60_40, risk_parity, rolling_mvo_ledoit_wolf,
+    )
     tickers = PortfolioEnv.DJ30_TICKERS
     results = {}
 
-    try:
-        results["Equal Weight"], _, _ = equal_weight(test_df, tickers)
-    except Exception as e:
-        print(f"  Baseline 'Equal Weight' failed: {e}")
+    def _try(name, fn, *a, **kw):
+        try:
+            results[name] = fn(*a, **kw)
+        except Exception as e:
+            print(f"  Baseline '{name}' failed: {e}")
 
-    try:
-        results["SPY/QQQ 60/40"], _, _ = spy_qqq(start=TEST_START, end=TEST_END)
-    except Exception as e:
-        print(f"  Baseline 'SPY/QQQ' failed: {e}")
-
-    try:
-        results["Momentum 12-1"], _, _ = momentum_12_1(test_df, tickers)
-    except Exception as e:
-        print(f"  Baseline 'Momentum 12-1' failed: {e}")
-
-    try:
-        results["Min Variance"], _, _ = min_variance(test_df, tickers, train_df=train_df)
-    except Exception as e:
-        print(f"  Baseline 'Min Variance' failed: {e}")
-
-    try:
-        results["Max Sharpe MVO"], _, _ = max_sharpe_mvo(test_df, tickers, train_df=train_df)
-    except Exception as e:
-        print(f"  Baseline 'Max Sharpe MVO' failed: {e}")
+    _try("Equal Weight", equal_weight, test_df, tickers)
+    _try("SPY/QQQ 60/40", spy_qqq, start=TEST_START, end=TEST_END)
+    _try("Momentum 12-1", momentum_12_1, test_df, tickers)
+    _try("Min Variance (static)", min_variance, test_df, tickers, train_df=train_df)
+    _try("Max Sharpe MVO (static)", max_sharpe_mvo, test_df, tickers, train_df=train_df)
+    _try("SPY Buy&Hold", spy_buy_and_hold, start=TEST_START, end=TEST_END)
+    _try("60/40 SPY/AGG", spy_agg_60_40, start=TEST_START, end=TEST_END)
+    _try("Risk Parity", risk_parity, test_df, tickers, train_df=train_df)
+    _try("Rolling MVO-LW (min-var)", rolling_mvo_ledoit_wolf, test_df, tickers,
+         kind="min_var", train_df=train_df)
+    _try("Rolling MVO-LW (max-Sharpe)", rolling_mvo_ledoit_wolf, test_df, tickers,
+         kind="max_sharpe", train_df=train_df)
 
     return results
+
+
+def _collect_baselines(test_df: pd.DataFrame, train_df: pd.DataFrame) -> dict:
+    """Backward-compat wrapper: {name: metrics_dict} only (used by print_comparison)."""
+    return {name: m for name, (m, _, _) in _collect_baselines_full(test_df, train_df).items()}
 
 
 def mode_train(args, config: dict):

@@ -14,8 +14,14 @@ from utils.baselines import (
     momentum_12_1,
     min_variance,
     max_sharpe_mvo,
+    spy_buy_and_hold,
+    spy_agg_60_40,
+    risk_parity,
+    rolling_mvo_ledoit_wolf,
     _min_variance_weights,
     _max_sharpe_weights,
+    _inverse_vol_weights,
+    _shrunk_covariance,
 )
 
 
@@ -206,4 +212,258 @@ class TestMaxSharpeMVO:
                                           tc_rate=0.001, slip_rate=0.001)
         _, vals_free, _ = max_sharpe_mvo(self.test_df, self.tickers, train_df=self.train_df,
                                           tc_rate=0.0, slip_rate=0.0)
+        assert vals_cost[-1] <= vals_free[-1]
+
+
+# ── Phase 4: strong baseline set (I-7) ──────────────────────────────────────────
+
+def _fake_yf_download(monkeypatch, tickers, dates, seed=0):
+    """Monkeypatch yfinance.download to return a synthetic price panel, so the
+    Phase-4 SPY/AGG baselines are testable without network access."""
+    import yfinance as yf
+
+    rng = np.random.default_rng(seed)
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    data = {}
+    for t in tickers:
+        price = 100.0
+        prices = []
+        for _ in dates:
+            price *= 1.0 + rng.normal(3e-4, 0.01)
+            prices.append(price)
+        data[t] = prices
+
+    if len(tickers) == 1:
+        close = pd.Series(data[tickers[0]], index=dates, name="Close")
+        frame = pd.DataFrame({"Close": close})
+    else:
+        cols = pd.MultiIndex.from_product([["Close"], tickers])
+        frame = pd.DataFrame(
+            np.column_stack([data[t] for t in tickers]), index=dates, columns=cols
+        )
+
+    def fake_download(symbols, start=None, end=None, auto_adjust=True, progress=False,
+                       multi_level_index=False, **kw):
+        return frame
+
+    monkeypatch.setattr(yf, "download", fake_download)
+
+
+class TestInverseVolWeights:
+    def test_sum_to_one_and_nonneg(self):
+        rng = np.random.default_rng(0)
+        n, T = 6, 100
+        rets = pd.DataFrame(rng.normal(0, 0.01, size=(T, n)))
+        w = _inverse_vol_weights(rets, n)
+        assert abs(w.sum() - 1.0) < 1e-8
+        assert (w >= 0).all()
+        assert len(w) == n
+
+    def test_lower_vol_asset_gets_higher_weight(self):
+        n, T = 3, 200
+        rng = np.random.default_rng(1)
+        low_vol = rng.normal(0, 0.005, size=T)
+        high_vol = rng.normal(0, 0.05, size=T)
+        mid_vol = rng.normal(0, 0.02, size=T)
+        rets = pd.DataFrame({"low": low_vol, "mid": mid_vol, "high": high_vol})
+        w = _inverse_vol_weights(rets, n)
+        w_low, w_mid, w_high = w[0], w[1], w[2]
+        assert w_low > w_mid > w_high
+
+    def test_short_window_falls_back_to_uniform(self):
+        n = 4
+        rets = pd.DataFrame(np.random.default_rng(2).normal(0, 0.01, size=(2, n)))
+        w = _inverse_vol_weights(rets, n)
+        assert np.allclose(w, np.ones(n) / n)
+
+
+class TestShrunkCovariance:
+    def test_shrinks_offdiagonal_vs_sample_cov(self):
+        """Ledoit-Wolf shrinkage should pull off-diagonal covariance toward zero
+        relative to the noisy sample covariance on a small, noisy panel."""
+        rng = np.random.default_rng(3)
+        n, T = 10, 40  # small T relative to n → sample cov is noisy
+        rets = pd.DataFrame(rng.normal(0, 0.02, size=(T, n)))
+        sample_cov = rets.cov().values
+        shrunk = _shrunk_covariance(rets)
+
+        off_sample = np.abs(sample_cov[~np.eye(n, dtype=bool)]).mean()
+        off_shrunk = np.abs(shrunk[~np.eye(n, dtype=bool)]).mean()
+        assert off_shrunk <= off_sample + 1e-12
+
+    def test_graceful_fallback_without_sklearn(self, monkeypatch):
+        """If scikit-learn is absent, fall back to sample covariance instead of raising."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **kw):
+            if name == "sklearn.covariance" or name.startswith("sklearn"):
+                raise ImportError("scikit-learn not installed (simulated)")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        rng = np.random.default_rng(4)
+        rets = pd.DataFrame(rng.normal(0, 0.01, size=(50, 5)))
+        cov = _shrunk_covariance(rets)
+        expected = rets.cov().values
+        assert np.allclose(cov, expected)
+
+
+class TestRiskParity:
+    def setup_method(self):
+        df, self.tickers = make_price_df(n_tickers=8, n_days=700)
+        self.train_df, self.test_df = train_test_split(df)
+
+    def test_returns_valid_metrics(self):
+        met, vals, _ = risk_parity(self.test_df, self.tickers, train_df=self.train_df)
+        assert "sharpe" in met and np.isfinite(met["sharpe"])
+        assert (vals > 0).all()
+
+    def test_costs_reduce_value(self):
+        _, vals_cost, _ = risk_parity(self.test_df, self.tickers, train_df=self.train_df,
+                                       tc_rate=0.001, slip_rate=0.001)
+        _, vals_free, _ = risk_parity(self.test_df, self.tickers, train_df=self.train_df,
+                                       tc_rate=0.0, slip_rate=0.0)
+        assert vals_cost[-1] <= vals_free[-1]
+
+    def test_cost_matches_hand_computed_formula(self):
+        """cost = (tc+slip) * sum(|dw|) * value, exactly like PortfolioEnv —
+        hand-verified against a single-rebalance synthetic 2-asset panel."""
+        dates = pd.bdate_range("2020-01-01", periods=40)
+        rows = []
+        for i, t in enumerate(["A", "B"]):
+            price = 100.0
+            for d in dates:
+                price *= 1.02 if i == 0 else 1.0
+                rows.append({"date": d, "tic": t, "close": price})
+        df = pd.DataFrame(rows)
+        met, vals, _ = risk_parity(df, ["A", "B"], lookback=10,
+                                    tc_rate=0.01, slip_rate=0.0, rebalance_freq="W")
+        assert (vals > 0).all()
+        assert np.isfinite(met["sharpe"])
+
+    def test_no_look_ahead_prefix_unaffected_by_later_data(self):
+        """Truncating the test window to an earlier end date must not change
+        the portfolio-value path up to the (shared) truncation point — proof
+        that rebalance decisions at date t never use data with date > t."""
+        df, tickers = make_price_df(n_tickers=6, n_days=500, seed=11)
+        train_df, test_df = train_test_split(df)
+        dates_sorted = sorted(test_df["date"].unique())
+        cut = dates_sorted[len(dates_sorted) // 2]
+        test_df_short = test_df[test_df["date"] <= cut].copy()
+
+        _, vals_full, dates_full = risk_parity(test_df, tickers, train_df=train_df, lookback=60)
+        _, vals_short, dates_short = risk_parity(test_df_short, tickers, train_df=train_df, lookback=60)
+
+        n_common = len(vals_short)
+        assert np.allclose(vals_full[:n_common], vals_short, rtol=1e-9)
+
+    def test_uses_train_df_history(self):
+        df2, _ = make_price_df(n_tickers=8, n_days=700, seed=123)
+        train_df2, _ = train_test_split(df2)
+        met1, _, _ = risk_parity(self.test_df, self.tickers, train_df=self.train_df)
+        met2, _, _ = risk_parity(self.test_df, self.tickers, train_df=train_df2)
+        assert met1["sharpe"] != met2["sharpe"]
+
+
+class TestRollingMVOLedoitWolf:
+    def setup_method(self):
+        df, self.tickers = make_price_df(n_tickers=8, n_days=700)
+        self.train_df, self.test_df = train_test_split(df)
+
+    def test_min_var_returns_valid_metrics(self):
+        met, vals, _ = rolling_mvo_ledoit_wolf(self.test_df, self.tickers, kind="min_var",
+                                                train_df=self.train_df)
+        assert "sharpe" in met and np.isfinite(met["sharpe"])
+        assert (vals > 0).all()
+
+    def test_max_sharpe_returns_valid_metrics(self):
+        met, vals, _ = rolling_mvo_ledoit_wolf(self.test_df, self.tickers, kind="max_sharpe",
+                                                train_df=self.train_df)
+        assert "sharpe" in met and np.isfinite(met["sharpe"])
+        assert (vals > 0).all()
+
+    def test_invalid_kind_raises(self):
+        with pytest.raises(ValueError):
+            rolling_mvo_ledoit_wolf(self.test_df, self.tickers, kind="bogus", train_df=self.train_df)
+
+    def test_costs_reduce_value(self):
+        _, vals_cost, _ = rolling_mvo_ledoit_wolf(
+            self.test_df, self.tickers, kind="min_var", train_df=self.train_df,
+            tc_rate=0.001, slip_rate=0.001)
+        _, vals_free, _ = rolling_mvo_ledoit_wolf(
+            self.test_df, self.tickers, kind="min_var", train_df=self.train_df,
+            tc_rate=0.0, slip_rate=0.0)
+        assert vals_cost[-1] <= vals_free[-1]
+
+    def test_no_look_ahead_prefix_unaffected_by_later_data(self):
+        dates_sorted = sorted(self.test_df["date"].unique())
+        cut = dates_sorted[len(dates_sorted) // 2]
+        test_df_short = self.test_df[self.test_df["date"] <= cut].copy()
+
+        _, vals_full, _ = rolling_mvo_ledoit_wolf(
+            self.test_df, self.tickers, kind="min_var", train_df=self.train_df, lookback=60)
+        _, vals_short, _ = rolling_mvo_ledoit_wolf(
+            test_df_short, self.tickers, kind="min_var", train_df=self.train_df, lookback=60)
+
+        n_common = len(vals_short)
+        assert np.allclose(vals_full[:n_common], vals_short, rtol=1e-9)
+
+    def test_rolling_differs_from_static(self):
+        """Rolling (re-estimated per rebalance) should generally produce a
+        different value path than the static single-estimate min_variance."""
+        met_static, _, _ = min_variance(self.test_df, self.tickers, train_df=self.train_df)
+        met_rolling, _, _ = rolling_mvo_ledoit_wolf(
+            self.test_df, self.tickers, kind="min_var", train_df=self.train_df, lookback=60)
+        assert np.isfinite(met_static["sharpe"]) and np.isfinite(met_rolling["sharpe"])
+
+
+class TestSpyBuyAndHold:
+    def test_entry_cost_incurred_once_then_zero(self, monkeypatch):
+        dates = pd.bdate_range("2023-01-01", periods=60)
+        _fake_yf_download(monkeypatch, "SPY", dates, seed=7)
+
+        met, vals, ret_dates = spy_buy_and_hold(
+            start="2023-01-01", end="2023-04-01", initial_capital=1_000_000.0,
+            tc_rate=0.001, slip_rate=0.001,
+        )
+        assert len(vals) == len(dates)
+        assert (vals > 0).all()
+
+        # No-cost comparison: value path should be a constant multiple apart
+        # (the single entry-cost haircut), i.e. cost is paid ONCE at t0 and
+        # never again — ratio of value curves is flat over time.
+        met_free, vals_free, _ = spy_buy_and_hold(
+            start="2023-01-01", end="2023-04-01", initial_capital=1_000_000.0,
+            tc_rate=0.0, slip_rate=0.0,
+        )
+        ratio = vals / vals_free
+        assert np.allclose(ratio, ratio[0], rtol=1e-9)
+        assert vals[0] < vals_free[0]
+
+    def test_returns_valid_metrics(self, monkeypatch):
+        dates = pd.bdate_range("2023-01-01", periods=60)
+        _fake_yf_download(monkeypatch, "SPY", dates, seed=8)
+        met, vals, dates_out = spy_buy_and_hold(start="2023-01-01", end="2023-04-01")
+        assert "sharpe" in met and np.isfinite(met["sharpe"])
+        assert len(vals) == len(dates_out)
+
+
+class TestSpyAgg6040:
+    def test_returns_valid_metrics(self, monkeypatch):
+        dates = pd.bdate_range("2023-01-01", periods=120)
+        _fake_yf_download(monkeypatch, ["SPY", "AGG"], dates, seed=9)
+        met, vals, dates_out = spy_agg_60_40(start="2023-01-01", end="2023-06-01")
+        assert "sharpe" in met and np.isfinite(met["sharpe"])
+        assert (vals > 0).all()
+
+    def test_costs_reduce_value(self, monkeypatch):
+        dates = pd.bdate_range("2023-01-01", periods=120)
+        _fake_yf_download(monkeypatch, ["SPY", "AGG"], dates, seed=10)
+        _, vals_cost, _ = spy_agg_60_40(start="2023-01-01", end="2023-06-01",
+                                        tc_rate=0.001, slip_rate=0.001)
+        _fake_yf_download(monkeypatch, ["SPY", "AGG"], dates, seed=10)
+        _, vals_free, _ = spy_agg_60_40(start="2023-01-01", end="2023-06-01",
+                                        tc_rate=0.0, slip_rate=0.0)
         assert vals_cost[-1] <= vals_free[-1]

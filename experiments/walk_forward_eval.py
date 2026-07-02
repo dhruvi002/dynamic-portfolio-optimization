@@ -51,12 +51,33 @@ from utils.seeding import set_global_seed
 from utils.run_meta import write_run_meta
 from utils.normalizer import RunningNormalizer
 from utils.walk_forward import walk_forward
-from utils.baselines import equal_weight
+from utils.baselines import (
+    equal_weight, spy_buy_and_hold, spy_agg_60_40, risk_parity, rolling_mvo_ledoit_wolf,
+)
 from utils import diagnostics as diag
 from utils import significance as sig
 from utils.regimes import regime_for, REGIME_ORDER
 
 from main import DEFAULT_CONFIG, _load_data
+
+
+# Phase 4 (I-7): the full baseline panel each fold is measured against, not
+# just equal-weight. (display name, dispatch kind) — kind is used by
+# `_baseline_fold_returns` below.
+BASELINE_SPECS = [
+    ("Equal Weight",               "equal_weight"),
+    ("SPY Buy&Hold",               "spy_bh"),
+    ("60/40 SPY/AGG",              "spy_agg"),
+    ("Risk Parity",                "risk_parity"),
+    ("Rolling MVO-LW (min-var)",   "mvo_lw_min_var"),
+    ("Rolling MVO-LW (max-Sharpe)", "mvo_lw_max_sharpe"),
+]
+
+
+def _sanitize(name: str) -> str:
+    """Turn a display name into a safe CSV column prefix."""
+    return (name.replace("&", "and").replace("/", "_").replace(" ", "_")
+                .replace("(", "").replace(")", "").replace("-", "_"))
 
 
 # Row keys that are scalar metrics (everything aggregated / written to CSV).
@@ -65,7 +86,8 @@ METRIC_KEYS = [
     "total_return", "ann_volatility", "win_rate",
     "mean_turnover", "mean_hhi", "mean_active_share",
     "ew_sharpe", "jk_sharpe_diff_annual",
-]
+    "best_baseline_sharpe", "jk_vs_best_diff_annual",
+] + [f"{_sanitize(n)}_sharpe" for n, _ in BASELINE_SPECS]
 
 
 # ── factories ────────────────────────────────────────────────────────────────────
@@ -93,16 +115,50 @@ def make_factories(config: dict, encoder: str):
     return agent_factory, normalizer_factory
 
 
-# ── per-fold equal-weight baseline + significance ───────────────────────────────
+# ── per-fold baseline panel + significance (Phase 4) ────────────────────────────
 
-def _equal_weight_returns(df_full: pd.DataFrame, test_start: str, test_end: str) -> pd.Series:
-    """Net-of-cost equal-weight daily returns over a fold's test window."""
+def _baseline_fold_returns(
+    kind: str,
+    df_full: pd.DataFrame,
+    train_df_fold: pd.DataFrame,
+    test_start: str,
+    test_end: str,
+) -> pd.Series:
+    """
+    Net-of-cost daily returns for ONE baseline over a fold's test window.
+
+    `train_df_fold` must be `df_full[df_full['date'] < test_start]` — i.e. only
+    data available *before* the fold's test window starts — so any estimator
+    (risk parity, rolling Ledoit-Wolf MVO) is leak-free by construction, exactly
+    like the agent's own expanding training window.
+    """
     sl = df_full[(df_full["date"] >= test_start) & (df_full["date"] <= test_end)].copy()
-    _, values, dates = equal_weight(sl, list(UNIVERSE))
+    tickers = list(UNIVERSE)
+
+    if kind == "equal_weight":
+        _, values, dates = equal_weight(sl, tickers)
+    elif kind == "spy_bh":
+        _, values, dates = spy_buy_and_hold(start=test_start, end=test_end)
+    elif kind == "spy_agg":
+        _, values, dates = spy_agg_60_40(start=test_start, end=test_end)
+    elif kind == "risk_parity":
+        _, values, dates = risk_parity(sl, tickers, train_df=train_df_fold)
+    elif kind == "mvo_lw_min_var":
+        _, values, dates = rolling_mvo_ledoit_wolf(sl, tickers, kind="min_var", train_df=train_df_fold)
+    elif kind == "mvo_lw_max_sharpe":
+        _, values, dates = rolling_mvo_ledoit_wolf(sl, tickers, kind="max_sharpe", train_df=train_df_fold)
+    else:
+        raise ValueError(f"unknown baseline kind {kind!r}")
+
     values = np.asarray(values, dtype=float)
     rets = np.diff(values) / (values[:-1] + 1e-12)
     idx = pd.to_datetime(dates)[1:1 + len(rets)]
-    return pd.Series(rets, index=idx, name="equal_weight")
+    return pd.Series(rets, index=idx, name=kind)
+
+
+def _equal_weight_returns(df_full: pd.DataFrame, test_start: str, test_end: str) -> pd.Series:
+    """Backward-compat thin wrapper (equal-weight only)."""
+    return _baseline_fold_returns("equal_weight", df_full, df_full, test_start, test_end)
 
 
 def _fold_significance(agent_rets: np.ndarray, test_dates: list, ew_ret: pd.Series) -> dict:
@@ -155,6 +211,25 @@ def _summarise_rows(rows: list, n_boot: int) -> dict:
         "mean_sharpe_diff_annual": float(np.mean(diffs)) if diffs else None,
         "std_sharpe_diff_annual": float(np.std(diffs, ddof=0)) if diffs else None,
     }
+
+    # Phase 4 (I-7): agent vs the STRONGEST baseline per fold — the headline
+    # comparison, tougher than equal-weight alone.
+    n_beat_best = sum(1 for r in rows if r.get("beats_best_baseline"))
+    p_vals_best = [r["jk_vs_best_p"] for r in rows if np.isfinite(r.get("jk_vs_best_p", np.nan))]
+    diffs_best = [r["jk_vs_best_diff_annual"] for r in rows
+                  if np.isfinite(r.get("jk_vs_best_diff_annual", np.nan))]
+    n_sig_best = sum(1 for p in p_vals_best if p < 0.05)
+    agg["_counts_vs_best"] = {
+        "n_folds": n,
+        "n_beat_best_baseline": n_beat_best,
+        "frac_beat_best_baseline": (n_beat_best / n) if n else None,
+        "n_jk_tests": len(p_vals_best),
+        "n_significant_5pct": n_sig_best,
+        "frac_significant_5pct": (n_sig_best / len(p_vals_best)) if p_vals_best else None,
+        "median_jk_p": float(np.median(p_vals_best)) if p_vals_best else None,
+        "mean_sharpe_diff_annual": float(np.mean(diffs_best)) if diffs_best else None,
+        "std_sharpe_diff_annual": float(np.std(diffs_best, ddof=0)) if diffs_best else None,
+    }
     return agg
 
 
@@ -164,7 +239,7 @@ def make_plot(regime_agg: dict, out_dir: str):
     try:
         import matplotlib
         matplotlib.use("Agg")
-        from utils.plotting import plot_walk_forward_regimes
+        from utils.plotting import plot_walk_forward_regimes, plot_walk_forward_baseline_panel
     except Exception as e:
         print(f"  Walk-forward plot skipped (import): {e}")
         return
@@ -174,6 +249,14 @@ def make_plot(regime_agg: dict, out_dir: str):
         print(f"  Per-regime figure → {path}")
     except Exception as e:
         print(f"  Walk-forward plot skipped: {e}")
+
+    try:
+        baseline_keys = {n: f"{_sanitize(n)}_sharpe" for n, _ in BASELINE_SPECS}
+        path = os.path.join(out_dir, "walk_forward_baseline_panel.png")
+        plot_walk_forward_baseline_panel(regime_agg, baseline_keys, save_path=path)
+        print(f"  Full baseline panel figure → {path}")
+    except Exception as e:
+        print(f"  Walk-forward baseline-panel plot skipped: {e}")
 
 
 # ── core driver (importable by main.py) ─────────────────────────────────────────
@@ -217,8 +300,25 @@ def run_walk_forward_eval(
             # Leak invariant (defence in depth; walk_forward also asserts it).
             assert fr["train_end"] < fr["test_start"], "LEAK: train_end >= test_start"
             regime = regime_for(fr["test_start"], fr["test_end"])
-            ew_ret = _equal_weight_returns(df, fr["test_start"], fr["test_end"])
-            sig_d = _fold_significance(fr["agent_returns"], fr["test_dates"], ew_ret)
+
+            # Phase 4 (I-7 wiring): compute EVERY baseline over this fold's test
+            # window, estimators fed only data with date < test_start (no
+            # look-ahead — same discipline as the agent's expanding train window).
+            train_df_fold = df[df["date"] < fr["test_start"]]
+            baseline_sig = {}
+            for disp_name, kind in BASELINE_SPECS:
+                try:
+                    b_ret = _baseline_fold_returns(kind, df, train_df_fold, fr["test_start"], fr["test_end"])
+                    baseline_sig[disp_name] = _fold_significance(fr["agent_returns"], fr["test_dates"], b_ret)
+                except Exception as e:
+                    print(f"    Baseline '{disp_name}' failed for fold {fr['fold']} seed {seed}: {e}")
+
+            # Equal-weight kept as the top-level (backward-compat) comparison.
+            sig_d = baseline_sig.get("Equal Weight", {
+                "ew_sharpe": float("nan"), "jk_sharpe_diff_annual": float("nan"),
+                "jk_z": float("nan"), "jk_p": float("nan"), "jk_significant": False,
+                "n_aligned": 0,
+            })
 
             row = {
                 "seed": int(seed),
@@ -243,6 +343,38 @@ def run_walk_forward_eval(
                 **sig_d,
             }
             row["beats_ew"] = bool(np.isfinite(row["ew_sharpe"]) and row["sharpe"] > row["ew_sharpe"])
+
+            # Per-baseline flat columns (Sharpe, ΔSharpe vs agent, beats flag).
+            best_name, best_sharpe = None, float("-inf")
+            for disp_name, bsig in baseline_sig.items():
+                prefix = _sanitize(disp_name)
+                b_sharpe = bsig.get("ew_sharpe", float("nan"))
+                row[f"{prefix}_sharpe"] = b_sharpe
+                row[f"{prefix}_jk_diff_annual"] = bsig.get("jk_sharpe_diff_annual")
+                row[f"{prefix}_jk_p"] = bsig.get("jk_p")
+                row[f"{prefix}_beats"] = bool(
+                    np.isfinite(b_sharpe) and np.isfinite(row["sharpe"]) and row["sharpe"] > b_sharpe
+                )
+                if np.isfinite(b_sharpe) and b_sharpe > best_sharpe:
+                    best_sharpe, best_name = b_sharpe, disp_name
+
+            # Headline: agent vs the STRONGEST baseline this fold.
+            row["best_baseline_name"] = best_name
+            row["best_baseline_sharpe"] = best_sharpe if best_name else float("nan")
+            if best_name:
+                bb = baseline_sig[best_name]
+                row["jk_vs_best_diff_annual"] = bb.get("jk_sharpe_diff_annual")
+                row["jk_vs_best_p"] = bb.get("jk_p")
+                row["jk_vs_best_significant"] = bb.get("jk_significant", False)
+                row["beats_best_baseline"] = bool(
+                    np.isfinite(row["sharpe"]) and row["sharpe"] > best_sharpe
+                )
+            else:
+                row["jk_vs_best_diff_annual"] = float("nan")
+                row["jk_vs_best_p"] = float("nan")
+                row["jk_vs_best_significant"] = False
+                row["beats_best_baseline"] = False
+
             rows.append(row)
 
     if not rows:
@@ -284,9 +416,16 @@ def run_walk_forward_eval(
     significance = {
         "framing": ("PRIMARY = per-(seed,fold) Jobson–Korkie–Memmel (each fold a "
                     "full-length OOS record over its test window); pooled DSR is a "
-                    "multiple-testing cross-check. No SE-shrinking averaging."),
+                    "multiple-testing cross-check. No SE-shrinking averaging. "
+                    "Phase 4: headline is agent vs the STRONGEST baseline per fold "
+                    "(see 'vs_best_baseline'); 'vs_equal_weight' kept for continuity."),
         "per_regime": {rg: regime_agg[rg]["_counts"] for rg in regimes_seen},
         "overall": overall_agg["_counts"],
+        "vs_best_baseline": {
+            "per_regime": {rg: regime_agg[rg]["_counts_vs_best"] for rg in regimes_seen},
+            "overall": overall_agg["_counts_vs_best"],
+        },
+        "baseline_panel": [n for n, _ in BASELINE_SPECS],
         "deflated_sharpe_ratio": dsr,
     }
     with open(os.path.join(out_dir, "walk_forward_significance.json"), "w") as f:
@@ -340,9 +479,36 @@ def _print_report(rows, regime_agg, overall_agg, dsr, regimes_seen, out_dir):
     if dsr is not None:
         print(f"  Deflated Sharpe Ratio (multiple-testing haircut): DSR = {dsr['dsr']:.4f}")
 
+    # Phase 4 headline: agent vs the STRONGEST baseline per regime (full panel).
+    print("\n" + "=" * 70)
+    print("  PER-REGIME — agent NET Sharpe vs the STRONGEST baseline (Phase 4 headline)")
+    print("=" * 70)
+    print(f"  {'Regime':<24}{'NET Sharpe':>22}{'Best baseline Sharpe':>22}{'k/N>best':>10}{'sig':>7}")
+    print("  " + "─" * 86)
+    for rg in regimes_seen:
+        a = regime_agg[rg]
+        cb = a["_counts_vs_best"]
+        s = a.get("sharpe", {})
+        best = a.get("best_baseline_sharpe", {})
+        net = f"{s.get('mean', float('nan')):+.3f}±{s.get('std', float('nan')):.3f}"
+        bm = f"{best.get('mean', float('nan')):+.3f}"
+        kn = f"{cb['n_beat_best_baseline']}/{cb['n_folds']}"
+        sg = f"{cb['n_significant_5pct']}/{cb['n_jk_tests']}"
+        print(f"  {rg:<24}{net:>22}{bm:>22}{kn:>10}{sg:>7}")
+    print("  " + "─" * 86)
+    ocb = overall_agg["_counts_vs_best"]
+    print(f"\n  OVERALL vs strongest baseline: beats it in "
+          f"{ocb['n_beat_best_baseline']}/{ocb['n_folds']} folds; "
+          f"{ocb['n_significant_5pct']}/{ocb['n_jk_tests']} JK tests significant at 5% "
+          f"(median p = {ocb['median_jk_p']})")
+    print(f"  OVERALL: ΔSharpe(annual) vs strongest baseline = {ocb['mean_sharpe_diff_annual']} "
+          f"± {ocb['std_sharpe_diff_annual']}")
+    print(f"  Baseline panel tested: {[n for n, _ in BASELINE_SPECS]}")
+
     print(f"\nArtifacts written to: {out_dir}/")
     print("  walk_forward_per_fold.csv, walk_forward_regime.json,")
-    print("  walk_forward_significance.json, run_meta.json, walk_forward_regimes.png")
+    print("  walk_forward_significance.json, run_meta.json, walk_forward_regimes.png,")
+    print("  walk_forward_baseline_panel.png")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────

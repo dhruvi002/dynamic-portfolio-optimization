@@ -249,6 +249,70 @@ def plot_walk_forward_regimes(regime_agg: dict, save_path: str = None):
     return fig
 
 
+def plot_walk_forward_baseline_panel(
+    regime_agg: dict,
+    baseline_sharpe_keys: dict,
+    save_path: str = None,
+):
+    """
+    Phase 4 (I-7): agent vs the FULL baseline panel, grouped bars with bootstrap
+    95% CI error bars, one group per regime. Companion to
+    `plot_walk_forward_regimes` (which only shows agent vs equal-weight).
+
+    `baseline_sharpe_keys` maps {display_name: aggregate_metrics_key}, e.g.
+    {"Equal Weight": "Equal_Weight_sharpe", "SPY Buy&Hold": "SPY_BuyHold_sharpe", ...}
+    — the sanitized `{prefix}_sharpe` columns produced by
+    `experiments/walk_forward_eval.py`. Each entry in `regime_agg` must hold
+    'sharpe' (the agent) and these baseline keys as aggregate stats dicts
+    (mean/ci_low/ci_high), as produced by `diagnostics.aggregate_metrics`.
+    """
+    regimes = list(regime_agg.keys())
+    if not regimes:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.text(0.5, 0.5, "no regimes to plot", ha="center", va="center")
+        return fig
+
+    series_names = ["SAC agent"] + list(baseline_sharpe_keys.keys())
+    n_series = len(series_names)
+    x = np.arange(len(regimes))
+    w = 0.8 / n_series
+
+    def _series(key):
+        means, los, his = [], [], []
+        for rg in regimes:
+            s = regime_agg[rg].get(key, {})
+            m = s.get("mean", np.nan)
+            means.append(m)
+            los.append(m - s.get("ci_low", m))
+            his.append(s.get("ci_high", m) - m)
+        return np.array(means), np.abs(np.array([los, his]))
+
+    fig, ax = plt.subplots(figsize=(max(10, 2.2 * len(regimes) + 4), 6))
+    palette = ["steelblue", "darkorange", "seagreen", "crimson", "mediumpurple",
+               "goldenrod", "slategray"]
+
+    for i, name in enumerate(series_names):
+        key = "sharpe" if name == "SAC agent" else baseline_sharpe_keys[name]
+        m, err = _series(key)
+        offset = (i - (n_series - 1) / 2) * w
+        ax.bar(x + offset, m, w, yerr=err, capsize=3,
+               color=palette[i % len(palette)], label=name,
+               alpha=0.95 if name == "SAC agent" else 0.85)
+
+    ax.axhline(0, color="black", lw=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(regimes, rotation=20, ha="right")
+    ax.set_ylabel("Annualized NET Sharpe")
+    ax.set_title("Walk-Forward: NET Sharpe — Agent vs Full Baseline Panel by Regime (95% CI)",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def plot_weight_heatmap(weights_history: np.ndarray, tickers: list, save_path: str = None):
     """Heatmap of portfolio weights over time."""
     fig, ax = plt.subplots(figsize=(16, 6))

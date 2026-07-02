@@ -50,7 +50,7 @@ from utils import significance as sig
 
 # Reuse the exact env/agent/data/baseline construction from main.py so the
 # harness measures the *same* pipeline as the single-seed run.
-from main import build_env, build_agent, _load_data, _collect_baselines
+from main import build_env, build_agent, _load_data, _collect_baselines, _collect_baselines_full
 
 
 # ── per-date return series alignment ────────────────────────────────────────────
@@ -85,10 +85,30 @@ def _equal_weight_return_series(test_df) -> pd.Series:
     """Equal-weight baseline daily returns, indexed by date (net of costs)."""
     from utils.baselines import equal_weight
     _, values, dates = equal_weight(test_df, PortfolioEnv.DJ30_TICKERS)
+    return _baseline_return_series(values, dates, name="equal_weight")
+
+
+def _baseline_return_series(values, dates, name: str = "baseline") -> pd.Series:
+    """
+    Phase 4: generic net-of-cost daily return series for ANY baseline's
+    (values, dates) output, indexed by date — mirrors
+    `_equal_weight_return_series` but works for the full baseline panel.
+    """
     values = np.asarray(values, dtype=float)
     rets = np.diff(values) / (values[:-1] + 1e-12)
     idx = pd.to_datetime(dates)[1:1 + len(rets)]
-    return pd.Series(rets, index=idx, name="equal_weight")
+    return pd.Series(rets, index=idx, name=name)
+
+
+def _collect_baseline_return_series(baselines_full: dict) -> dict:
+    """{name: pd.Series} of net daily returns for every baseline that succeeded."""
+    out = {}
+    for name, (metrics, values, dates) in baselines_full.items():
+        try:
+            out[name] = _baseline_return_series(values, dates, name=name)
+        except Exception as e:
+            print(f"  Baseline '{name}' return-series alignment failed: {e}")
+    return out
 
 
 # ── single-seed run ─────────────────────────────────────────────────────────────
@@ -178,43 +198,33 @@ def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
 
 # ── significance across seeds ───────────────────────────────────────────────────
 
-def run_significance(per_seed_extras, ew_ret, per_seed_records, args):
-    """Jobson–Korkie–Memmel + bootstrap CI + DSR on the agent vs equal-weight."""
-    # Build aligned matrix of per-seed agent returns; average to the expected
-    # agent return series (and keep per-seed for per-seed JK tests).
+def _jk_vs_one_baseline(per_seed_extras, base_ret, per_seed_records, args):
+    """Jobson–Korkie–Memmel + bootstrap CI for the agent vs a single baseline series."""
     aligned = []
-    common = ew_ret.index
+    common = base_ret.index
     for ex in per_seed_extras:
         common = common.intersection(ex["agent_ret"].index)
-    ew_a = ew_ret.reindex(common).values
+    if common.size < 3:
+        return None
+    base_a = base_ret.reindex(common).values
     for ex in per_seed_extras:
         aligned.append(ex["agent_ret"].reindex(common).values)
     aligned = np.vstack(aligned)               # (n_seeds, T)
     agent_mean = aligned.mean(axis=0)          # expected agent return series
 
-    # Per-seed JK tests (distribution of the verdict)
+    # Per-seed JK tests (distribution of the verdict) — PRIMARY statement.
     per_seed_jk = []
     for i, a in enumerate(aligned):
         try:
-            r = sig.jobson_korkie_memmel(a, ew_a)
+            r = sig.jobson_korkie_memmel(a, base_a)
             r["seed"] = per_seed_records[i]["seed"]
             per_seed_jk.append(r)
         except Exception as e:
             per_seed_jk.append({"seed": per_seed_records[i]["seed"], "error": str(e)})
 
-    jk_main = sig.jobson_korkie_memmel(agent_mean, ew_a)
+    jk_main = sig.jobson_korkie_memmel(agent_mean, base_a)
     boot = sig.sharpe_diff_bootstrap_ci(
-        agent_mean, ew_a, n_boot=args.bootstrap, avg_block=args.block, seed=0
-    )
-
-    # Deflated Sharpe Ratio on the expected agent series
-    sr_periodic = sig.periodic_sharpe(agent_mean)
-    skew = float(pd.Series(agent_mean).skew())
-    kurt = float(pd.Series(agent_mean).kurt() + 3.0)  # pandas gives excess kurtosis
-    sr_trials_std = float(np.std([sig.periodic_sharpe(a) for a in aligned], ddof=0))
-    dsr = sig.deflated_sharpe_ratio(
-        sr_periodic, n_obs=agent_mean.size, skew=skew, kurt=kurt,
-        n_trials=args.n_trials, sr_trials_std=sr_trials_std or None,
+        agent_mean, base_a, n_boot=args.bootstrap, avg_block=args.block, seed=0
     )
 
     p_vals = [r["p_value"] for r in per_seed_jk if "p_value" in r]
@@ -238,7 +248,57 @@ def run_significance(per_seed_extras, ew_ret, per_seed_records, args):
         # so it must not be quoted as the headline p-value.
         "jobson_korkie_memmel_pooled_optimistic": jk_main,
         "bootstrap_sharpe_diff": boot,
+    }
+
+
+def run_significance(per_seed_extras, baseline_series: dict, per_seed_records, args):
+    """
+    Phase 4 (I-7 wiring): per-seed Jobson–Korkie–Memmel of the agent vs EVERY
+    baseline in `baseline_series` (not just equal-weight), plus a single
+    Deflated Sharpe Ratio on the agent's own expected return series (DSR does
+    not depend on the comparison baseline). Returns:
+        {
+          "vs_baseline": {name: <_jk_vs_one_baseline output>, ...},
+          "deflated_sharpe_ratio": {...},
+          "strongest_baseline": name,   # highest point-estimate agent-beats-it margin
+        }
+    "equal_weight" is always included (kept for backward-compat with earlier
+    phases' headline framing) if present in `baseline_series`.
+    """
+    vs_baseline = {}
+    for name, base_ret in baseline_series.items():
+        r = _jk_vs_one_baseline(per_seed_extras, base_ret, per_seed_records, args)
+        if r is not None:
+            vs_baseline[name] = r
+
+    # Deflated Sharpe Ratio on the expected agent series (baseline-independent).
+    common = None
+    for ex in per_seed_extras:
+        common = ex["agent_ret"].index if common is None else common.intersection(ex["agent_ret"].index)
+    aligned = np.vstack([ex["agent_ret"].reindex(common).values for ex in per_seed_extras])
+    agent_mean = aligned.mean(axis=0)
+    sr_periodic = sig.periodic_sharpe(agent_mean)
+    skew = float(pd.Series(agent_mean).skew())
+    kurt = float(pd.Series(agent_mean).kurt() + 3.0)  # pandas gives excess kurtosis
+    sr_trials_std = float(np.std([sig.periodic_sharpe(a) for a in aligned], ddof=0))
+    dsr = sig.deflated_sharpe_ratio(
+        sr_periodic, n_obs=agent_mean.size, skew=skew, kurt=kurt,
+        n_trials=args.n_trials, sr_trials_std=sr_trials_std or None,
+    )
+
+    # "Strongest baseline" = the one with the highest annualized Sharpe among
+    # the baselines actually tested (agent vs the toughest bar, not just EW).
+    strongest = None
+    best_sr = -np.inf
+    for name, r in vs_baseline.items():
+        b_sr = r["jobson_korkie_memmel_pooled_optimistic"]["sharpe_b_annual"]
+        if np.isfinite(b_sr) and b_sr > best_sr:
+            best_sr, strongest = b_sr, name
+
+    return {
+        "vs_baseline": vs_baseline,
         "deflated_sharpe_ratio": dsr,
+        "strongest_baseline": strongest,
     }
 
 
@@ -331,14 +391,17 @@ def main():
     agg = diag.aggregate_metrics(per_seed_records, keys=agg_keys,
                                  n_boot=args.bootstrap, seed=0)
 
-    # ── Baselines (deterministic point estimates) ───────────────────────────────
+    # ── Baselines (deterministic point estimates) — Phase 4 full panel ──────────
     print("\nComputing baselines…")
-    baselines = _collect_baselines(test_df, train_df)
+    baselines_full = _collect_baselines_full(test_df, train_df)
+    baselines = {name: m for name, (m, _, _) in baselines_full.items()}
 
-    # ── Significance ─────────────────────────────────────────────────────────────
-    print("\nRunning significance tests (Jobson–Korkie–Memmel + bootstrap + DSR)…")
-    ew_ret = _equal_weight_return_series(test_df)
-    significance = run_significance(per_seed_extras, ew_ret, per_seed_records, args)
+    # ── Significance vs EVERY baseline (Phase 4 wiring of I-7) ──────────────────
+    print("\nRunning significance tests (Jobson–Korkie–Memmel + bootstrap + DSR) "
+          "vs the full baseline panel…")
+    baseline_series = _collect_baseline_return_series(baselines_full)
+    ew_ret = baseline_series.get("Equal Weight") or _equal_weight_return_series(test_df)
+    significance = run_significance(per_seed_extras, baseline_series, per_seed_records, args)
 
     # ── Persist ──────────────────────────────────────────────────────────────────
     pd.DataFrame(per_seed_records).to_csv(
@@ -370,28 +433,32 @@ def main():
     print("=" * 64)
     print(diag.format_aggregate_table(agg, keys=agg_keys))
 
-    print("\n  Baselines (deterministic):")
-    for name, m in baselines.items():
-        print(f"    {name:<16} Sharpe {m.get('sharpe', float('nan')):.3f} | "
+    print("\n  Baselines (deterministic, Phase 4 full panel):")
+    for name, m in sorted(baselines.items(), key=lambda kv: -kv[1].get("sharpe", float("-inf"))):
+        print(f"    {name:<28} Sharpe {m.get('sharpe', float('nan')):+.3f} | "
               f"total_return {m.get('total_return', float('nan')):+.2%}")
 
-    jk = significance["jobson_korkie_memmel_pooled_optimistic"]
-    boot = significance["bootstrap_sharpe_diff"]
     dsr = significance["deflated_sharpe_ratio"]
-    psum = significance["per_seed_summary"]
-    print("\n  Significance — SAC minus Equal-Weight Sharpe:")
-    print("    PRIMARY (per-seed Jobson–Korkie, Memmel — each seed a full-length record):")
-    print(f"      {psum['n_significant_5pct']}/{psum['n_seeds']} seeds significant at 5% "
-          f"(median p = {psum['median_p']:.2e})")
-    print(f"      ΔSharpe(annual) across seeds = {psum['mean_sharpe_diff_annual']:+.3f} "
-          f"± {psum['std_sharpe_diff_annual']:.3f}")
+    strongest = significance["strongest_baseline"]
+    print(f"\n  Significance — SAC vs EVERY baseline (headline = vs strongest: {strongest}):")
     print(f"    Deflated Sharpe Ratio (n_trials={dsr['n_trials']}): DSR = {dsr['dsr']:.4f}")
-    print("    Cross-checks (optimistic — averaging shrinks SE, do not quote as headline):")
-    print(f"      Pooled JK on mean series: ΔSharpe(annual) = {jk['sharpe_diff_annual']:+.3f}, "
-          f"z = {jk['z_stat']:+.3f}, p = {jk['p_value']:.2e}")
-    print(f"      Bootstrap 95% CI on ΔSharpe(annual): "
-          f"[{boot['ci_annual'][0]:+.3f}, {boot['ci_annual'][1]:+.3f}]  "
-          f"(excludes 0: {boot['ci_excludes_zero']})")
+    for name, r in significance["vs_baseline"].items():
+        psum = r["per_seed_summary"]
+        jk = r["jobson_korkie_memmel_pooled_optimistic"]
+        boot = r["bootstrap_sharpe_diff"]
+        tag = "  ← HEADLINE (strongest)" if name == strongest else ("  (equal-weight)" if name == "Equal Weight" else "")
+        print(f"    vs {name}{tag}")
+        print("      PRIMARY (per-seed Jobson–Korkie, Memmel — each seed a full-length record):")
+        print(f"        {psum['n_significant_5pct']}/{psum['n_seeds']} seeds significant at 5% "
+              f"(median p = {psum['median_p']:.2e})")
+        print(f"        ΔSharpe(annual) across seeds = {psum['mean_sharpe_diff_annual']:+.3f} "
+              f"± {psum['std_sharpe_diff_annual']:.3f}")
+        print("      Cross-checks (optimistic — averaging shrinks SE, do not quote as headline):")
+        print(f"        Pooled JK on mean series: ΔSharpe(annual) = {jk['sharpe_diff_annual']:+.3f}, "
+              f"z = {jk['z_stat']:+.3f}, p = {jk['p_value']:.2e}")
+        print(f"        Bootstrap 95% CI on ΔSharpe(annual): "
+              f"[{boot['ci_annual'][0]:+.3f}, {boot['ci_annual'][1]:+.3f}]  "
+              f"(excludes 0: {boot['ci_excludes_zero']})")
 
     # Transaction-cost impact: gross (pre-cost) vs net (post-cost) Sharpe.
     if "gross_sharpe" in agg and "sharpe" in agg:
