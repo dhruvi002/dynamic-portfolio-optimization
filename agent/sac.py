@@ -173,6 +173,37 @@ class Critic(nn.Module):
 
 # ─── SAC Agent ────────────────────────────────────────────────────────────────
 
+def dirichlet_symmetric_entropy(action_dim: int, conc: float) -> float:
+    """
+    Differential entropy of a symmetric Dirichlet(conc · 1_K) on the K-simplex.
+
+    Phase 5 (Task A, I-6): used to derive a target entropy the clamped
+    `DirichletActor` can actually attain. The Dirichlet differential entropy is
+    maximised at the uniform policy (conc=1, H = -lgamma(K)) and falls off on
+    BOTH sides — collapsing to -inf as conc→0 and decreasing again as conc grows.
+    The old target `-(lgamma(K) + 0.5·K)` sat far below the uniform maximum
+    (for K=24: -63.6 vs -51.6, ~conc 5.5), demanding a concentration the actor
+    only reaches under strong critic pressure; with no clamp on log-alpha the
+    auto-tuner ran away (α → 9.6 blow-up) or, when the critic over-concentrated,
+    collapsed (α → 1e-3). Targeting a *mild* symmetric concentration keeps the
+    policy near-diversified (which also curbs turnover — see Phase 5 Task B)
+    while remaining an attainable, interpretable fixed point.
+
+        H = K·lgamma(c) − lgamma(K·c) + (K·c − K)·ψ(K·c) − K·(c − 1)·ψ(c)
+
+    with c = conc, ψ = digamma.
+    """
+    c = float(conc)
+    K = int(action_dim)
+    a0 = K * c
+    t = torch.tensor([c, a0], dtype=torch.float64)
+    lgamma_c, lgamma_a0 = torch.lgamma(t).tolist()
+    digamma_c, digamma_a0 = torch.digamma(t).tolist()
+    return (K * lgamma_c - lgamma_a0
+            + (a0 - K) * digamma_a0
+            - K * (c - 1.0) * digamma_c)
+
+
 class SACAgent:
     """
     Soft Actor-Critic agent with automatic entropy temperature tuning.
@@ -201,6 +232,11 @@ class SACAgent:
         hidden_sizes: list = None,
         device: str = "auto",
         encoder: str = "mlp",
+        target_entropy: float = None,
+        target_conc: float = 2.0,
+        alpha_init: float = 1.0,
+        alpha_min: float = 0.01,
+        alpha_max: float = 5.0,
     ):
         if hidden_sizes is None:
             hidden_sizes = [256, 256]
@@ -223,14 +259,33 @@ class SACAgent:
         self.critic_target = Critic(state_dim, action_dim, hidden_sizes, encoder=encoder, n_assets=n_assets).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # Automatic entropy tuning.
-        # For a Dirichlet on K-simplex the maximum differential entropy is
-        # H_max = -log Γ(K) ≈ -71 nats for K=30 (attained by the uniform
-        # Dirichlet α_i=1).  The standard SAC heuristic -K would be wildly
-        # above H_max, making α collapse to 0.  We target slightly below H_max
-        # to allow moderate portfolio concentration while still regularising.
-        self.target_entropy = -(math.lgamma(action_dim) + action_dim * 0.5)
-        self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
+        # Automatic entropy tuning with a Dirichlet-attainable target and a
+        # bounded temperature (Phase 5, Task A, I-6).
+        #
+        # Differential entropy of a Dirichlet is MAXIMISED at the uniform policy
+        # (H_uniform = -lgamma(K); -51.6 nats for K=24) and decreases on both
+        # sides. The old target -(lgamma(K)+0.5K) = -63.6 sat well below that
+        # maximum (~symmetric conc 5.5), so the tuner chased a concentration the
+        # actor rarely reaches and — with no clamp — log-alpha ran away (α→9.6)
+        # or collapsed (α→1e-3) across seeds/folds. We instead target the
+        # entropy of a MILD symmetric Dirichlet(target_conc·1_K) (default
+        # conc=2.0 → -54.3 nats, just below uniform): an attainable fixed point
+        # that keeps the policy near-diversified, which also curbs turnover.
+        if target_entropy is None:
+            target_entropy = dirichlet_symmetric_entropy(action_dim, target_conc)
+        self.target_entropy = float(target_entropy)
+        self.target_conc    = float(target_conc)
+
+        # Bound the temperature so neither blow-up nor collapse can recur; the
+        # log_alpha tensor is clamped in-place after every update() step.
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        self._log_alpha_min = math.log(self.alpha_min)
+        self._log_alpha_max = math.log(self.alpha_max)
+        init_log_alpha = min(max(math.log(alpha_init), self._log_alpha_min),
+                             self._log_alpha_max)
+        self.log_alpha = torch.tensor(init_log_alpha, requires_grad=True,
+                                      device=self.device)
         self.alpha = self.log_alpha.exp().item()
 
         # Optimisers
@@ -295,6 +350,10 @@ class SACAgent:
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
+        # Bound the temperature (Phase 5, Task A) so it can neither blow up nor
+        # collapse regardless of transient target/critic pressure.
+        with torch.no_grad():
+            self.log_alpha.clamp_(self._log_alpha_min, self._log_alpha_max)
         self.alpha = self.log_alpha.exp().item()
 
         # ── Soft-update target critic ─────────────────────────────────────────

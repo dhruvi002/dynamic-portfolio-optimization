@@ -23,6 +23,19 @@ import random
 
 import numpy as np
 
+# ── Single-thread pinning for CPU determinism (Phase 5, Task C, §12) ──────────
+# Two identical-seed runs previously produced different per-seed results. On a
+# CPU-only machine the dominant cause is multi-threaded intra-op parallelism:
+# floating-point reductions are summed in a nondeterministic order across
+# OpenMP/MKL threads. These env vars must be set *before* the numerical
+# backends (torch / numpy-MKL / OpenMP) spin up their thread pools, so they are
+# assigned at import time of this module. Entry points import `utils.seeding`
+# up front, and `torch.set_num_threads(1)` in `set_global_seed` enforces the
+# same at runtime as a belt-and-braces measure regardless of import order.
+for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 
 def set_global_seed(seed: int, deterministic: bool = True) -> int:
     """
@@ -55,6 +68,18 @@ def set_global_seed(seed: int, deterministic: bool = True) -> int:
 
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+    # Pin intra-op (and, best-effort, inter-op) threads to 1 so CPU float
+    # reductions have a fixed summation order (Phase 5, Task C). This is the
+    # runtime counterpart to the env vars set at module import above and takes
+    # effect even if torch was imported before this module.
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # Can only be set once, before any parallel work has started; ignore if
+        # torch has already launched its inter-op pool.
+        pass
 
     if deterministic:
         # cuDNN determinism (no-op on CPU-only machines).

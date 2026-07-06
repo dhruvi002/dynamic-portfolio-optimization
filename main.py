@@ -45,12 +45,13 @@ NORMALIZER_PATH = "checkpoints/normalizer.pkl"
 
 
 def build_env(df: pd.DataFrame, sentiment_df: pd.DataFrame = None,
-              seed: int = None) -> PortfolioEnv:
+              seed: int = None, turnover_penalty: float = 0.0) -> PortfolioEnv:
     return PortfolioEnv(
         df,
         transaction_cost_rate=0.001,
         slippage_rate=0.001,
         initial_capital=1_000_000.0,
+        turnover_penalty=turnover_penalty,   # Phase 5 (Task B); 0.0 = no change
         sentiment_df=sentiment_df,
         seed=seed,
     )
@@ -69,6 +70,11 @@ def build_agent(env: PortfolioEnv, config: dict, encoder: str = "mlp") -> SACAge
         buffer_size=config.get("buffer_size", 1_000_000),
         hidden_sizes=[int(config.get("hidden_size", 256))] * 2,
         encoder=encoder,
+        # Phase 5 (Task A) entropy controls; config-overridable, safe defaults.
+        target_conc=config.get("target_conc", 2.0),
+        alpha_init=config.get("alpha_init", 1.0),
+        alpha_min=config.get("alpha_min", 0.01),
+        alpha_max=config.get("alpha_max", 5.0),
     )
 
 
@@ -169,7 +175,8 @@ def mode_train(args, config: dict):
     if args.sentiment and sentiment_df is not None:
         merged_sentiment_df = sentiment_df
 
-    train_env = build_env(train_df, sentiment_df=merged_sentiment_df, seed=args.seed)
+    train_env = build_env(train_df, sentiment_df=merged_sentiment_df, seed=args.seed,
+                          turnover_penalty=config.get("turnover_penalty", 0.0))
     val_env   = build_env(val_df, sentiment_df=merged_sentiment_df, seed=args.seed)
     agent     = build_agent(train_env, config, encoder=args.encoder)
     print(f"  State dim: {train_env.state_dim}  |  Action dim: {train_env.action_dim}")

@@ -49,6 +49,13 @@ def train(
     # ── Warm-up: fill replay buffer with random transitions ─────────────────
     print(f"Warming up replay buffer ({warmup_steps} random steps)…")
     state, _ = env.reset(seed=seed)
+    # Seed the action space too (Phase 5, Task C). Gymnasium seeds env.np_random
+    # from reset(seed=), but action_space.sample() draws from a SEPARATE RNG that
+    # is otherwise randomly initialised — leaving the warm-up transitions (and
+    # therefore the whole replay buffer) nondeterministic across identical-seed
+    # runs. This was a primary source of the §12 nondeterminism.
+    if seed is not None:
+        env.action_space.seed(seed)
     step = 0
     while step < warmup_steps:
         norm_state = _norm(normalizer, state, update=True)

@@ -13,7 +13,10 @@ import numpy as np
 import torch
 import pytest
 
-from agent.sac import SACAgent, DirichletActor, AssetTransformerEncoder
+from agent.sac import (
+    SACAgent, DirichletActor, AssetTransformerEncoder,
+    dirichlet_symmetric_entropy,
+)
 
 
 STATE_DIM  = 30
@@ -134,6 +137,58 @@ def test_target_entropy_below_hmax():
         assert a.target_entropy < h_max, (
             f"K={K}: target_entropy={a.target_entropy:.4f} ≥ H_max={h_max:.4f}"
         )
+
+
+# ── Phase 5 Task A: attainable target entropy + bounded temperature ────────────
+
+def test_dirichlet_symmetric_entropy_matches_closed_form():
+    # Cross-check against the digamma closed form for a symmetric Dirichlet.
+    # K=24, conc=2.0 → -54.2916 (verified against scipy in the Phase 5 plan).
+    assert dirichlet_symmetric_entropy(24, 2.0) == pytest.approx(-54.2916, abs=1e-3)
+    # conc=1 is the uniform policy → H = -lgamma(K), the entropy MAXIMUM.
+    assert dirichlet_symmetric_entropy(24, 1.0) == pytest.approx(-math.lgamma(24), abs=1e-4)
+
+
+def test_target_entropy_defaults_to_mild_concentration():
+    # Default target = entropy of a mildly-concentrated symmetric Dirichlet
+    # (conc=2.0). It must sit just below the uniform maximum, not far below it
+    # like the old -(lgamma(K)+0.5K) target that drove the α blow-up.
+    K = 24
+    a = SACAgent(state_dim=10, action_dim=K, batch_size=4, hidden_sizes=[32])
+    h_uniform = -math.lgamma(K)                     # -51.61
+    old_target = -(math.lgamma(K) + K * 0.5)        # -63.61
+    assert a.target_entropy == pytest.approx(dirichlet_symmetric_entropy(K, 2.0), abs=1e-3)
+    assert old_target < a.target_entropy < h_uniform
+
+
+def test_target_entropy_configurable():
+    # target_conc controls the target; an explicit target_entropy overrides it.
+    a1 = SACAgent(state_dim=10, action_dim=8, batch_size=4, hidden_sizes=[32],
+                  target_conc=1.5)
+    assert a1.target_entropy == pytest.approx(dirichlet_symmetric_entropy(8, 1.5), abs=1e-3)
+    a2 = SACAgent(state_dim=10, action_dim=8, batch_size=4, hidden_sizes=[32],
+                  target_entropy=-12.34)
+    assert a2.target_entropy == pytest.approx(-12.34)
+
+
+def test_alpha_init_clamped_into_band():
+    a = SACAgent(state_dim=10, action_dim=5, batch_size=4, hidden_sizes=[32],
+                 alpha_init=100.0, alpha_min=0.01, alpha_max=5.0)
+    assert a.alpha <= 5.0 + 1e-6
+    assert a.alpha >= 0.01 - 1e-6
+
+
+def test_alpha_cannot_blow_up():
+    # The core I-6 fix: even under many updates the temperature must stay within
+    # [alpha_min, alpha_max]. A tight ceiling makes the guard unambiguous.
+    a = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, batch_size=20,
+                 hidden_sizes=[64, 64], alpha_min=0.05, alpha_max=2.0,
+                 lr_alpha=1.0)   # huge α LR to try to force a blow-up
+    _fill_buffer(a, n=40)
+    for _ in range(50):
+        a.update()
+        assert 0.05 - 1e-6 <= a.alpha <= 2.0 + 1e-6, f"alpha escaped band: {a.alpha}"
+        assert a._log_alpha_min <= a.log_alpha.item() <= a._log_alpha_max
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────

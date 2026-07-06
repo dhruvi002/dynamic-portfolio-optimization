@@ -114,6 +114,74 @@ def test_transaction_costs_applied(env):
     assert info["tc"] > 0
 
 
+# ── Turnover penalty (Phase 5, Task B) ────────────────────────────────────────
+
+def test_turnover_penalty_default_is_zero(env):
+    # Default λ_turnover=0.0 must reproduce the pre-Phase-5 reward exactly.
+    assert env.turnover_penalty == 0.0
+
+
+def test_turnover_penalty_reduces_reward_on_high_turnover():
+    # With λ_turnover>0, a high-turnover step must earn strictly less reward than
+    # the identical step under λ_turnover=0 (same prices, same weight change).
+    df, tickers = make_df()
+    n = len(tickers)
+    w1 = np.zeros(n, dtype=np.float32); w1[0] = 1.0
+    w2 = np.zeros(n, dtype=np.float32); w2[-1] = 1.0
+
+    def reward_second_step(penalty):
+        e = PortfolioEnv(df, tickers=tickers, transaction_cost_rate=0.001,
+                         slippage_rate=0.001, turnover_penalty=penalty)
+        e.reset()
+        e.step(w1)
+        _, reward, _, _, info = e.step(w2)
+        return reward, info["turnover"]
+
+    r0, turn0 = reward_second_step(0.0)
+    rp, turnp = reward_second_step(0.5)
+    assert turn0 == pytest.approx(turnp), "turnover must be identical across runs"
+    assert turnp > 0, "sanity: the flip should incur turnover"
+    assert rp < r0, "positive penalty must lower the reward on a high-turnover step"
+
+
+def test_turnover_penalty_magnitude_matches_formula():
+    # reward = (log_return - λ·turnover) · reward_scaling. The difference between
+    # penalised and unpenalised reward must equal exactly λ·turnover·reward_scaling.
+    df, tickers = make_df()
+    n = len(tickers)
+    w1 = np.zeros(n, dtype=np.float32); w1[0] = 1.0
+    w2 = np.zeros(n, dtype=np.float32); w2[-1] = 1.0
+    lam = 0.3
+
+    def run(penalty):
+        e = PortfolioEnv(df, tickers=tickers, reward_scaling=1e-4,
+                         turnover_penalty=penalty)
+        e.reset(); e.step(w1)
+        _, reward, _, _, info = e.step(w2)
+        return reward, info["turnover"], e.reward_scaling
+
+    r0, turn, scaling = run(0.0)
+    rp, _, _ = run(lam)
+    assert (r0 - rp) == pytest.approx(lam * turn * scaling, rel=1e-6)
+
+
+def test_turnover_penalty_no_effect_when_no_trading():
+    # Holding the initial equal weights → zero turnover → penalty term is 0, so
+    # the reward is identical with or without a penalty.
+    df, tickers = make_df()
+    n = len(tickers)
+    hold = np.ones(n, dtype=np.float32) / n   # equals the reset weights
+    def first_reward(penalty):
+        e = PortfolioEnv(df, tickers=tickers, turnover_penalty=penalty)
+        e.reset()
+        _, reward, _, _, info = e.step(hold)
+        return reward, info["turnover"]
+    r0, t0 = first_reward(0.0)
+    rp, tp = first_reward(1.0)
+    assert t0 == pytest.approx(0.0, abs=1e-6)
+    assert rp == pytest.approx(r0)
+
+
 # ── Sentiment integration ─────────────────────────────────────────────────────
 
 def make_sentiment_df(tickers, dates, seed=1):

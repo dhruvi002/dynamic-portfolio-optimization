@@ -52,7 +52,8 @@ from utils.run_meta import write_run_meta
 from utils.normalizer import RunningNormalizer
 from utils.walk_forward import walk_forward
 from utils.baselines import (
-    equal_weight, spy_buy_and_hold, spy_agg_60_40, risk_parity, rolling_mvo_ledoit_wolf,
+    equal_weight, risk_parity, rolling_mvo_ledoit_wolf,
+    spy_buy_and_hold_from_series, spy_agg_60_40_from_series,
 )
 from utils import diagnostics as diag
 from utils import significance as sig
@@ -107,6 +108,11 @@ def make_factories(config: dict, encoder: str):
             buffer_size=config.get("buffer_size", 1_000_000),
             hidden_sizes=[int(config.get("hidden_size", 256))] * 2,
             encoder=encoder,
+            # Phase 5 (Task A) entropy controls; config-overridable.
+            target_conc=config.get("target_conc", 2.0),
+            alpha_init=config.get("alpha_init", 1.0),
+            alpha_min=config.get("alpha_min", 0.01),
+            alpha_max=config.get("alpha_max", 5.0),
         )
 
     def normalizer_factory(state_dim, n_skip):
@@ -117,12 +123,33 @@ def make_factories(config: dict, encoder: str):
 
 # ── per-fold baseline panel + significance (Phase 4) ────────────────────────────
 
+def _load_spy_agg_full_span(start: str, end: str) -> dict:
+    """
+    Download SPY + AGG ONCE for the full walk-forward span and cache the price
+    series in memory, so `_baseline_fold_returns` can slice per-fold windows
+    locally instead of hitting yfinance once per fold. A pre-fix Phase-4 run
+    hit multi-hour stalls (one fold took 33h) from repeated per-fold downloads
+    — this is the fix.
+    """
+    from utils.baselines import _yf_download
+    out = {"spy": None, "agg": None}
+    try:
+        raw = _yf_download(("SPY", "AGG"), start, end)
+        out["spy"] = raw["SPY"]
+        out["agg"] = raw["AGG"]
+    except Exception as e:
+        print(f"  WARNING: could not pre-fetch SPY/AGG for the full span ({e}); "
+              f"SPY Buy&Hold / 60-40 SPY-AGG baselines will be skipped for all folds.")
+    return out
+
+
 def _baseline_fold_returns(
     kind: str,
     df_full: pd.DataFrame,
     train_df_fold: pd.DataFrame,
     test_start: str,
     test_end: str,
+    spy_agg_cache: dict,
 ) -> pd.Series:
     """
     Net-of-cost daily returns for ONE baseline over a fold's test window.
@@ -130,7 +157,9 @@ def _baseline_fold_returns(
     `train_df_fold` must be `df_full[df_full['date'] < test_start]` — i.e. only
     data available *before* the fold's test window starts — so any estimator
     (risk parity, rolling Ledoit-Wolf MVO) is leak-free by construction, exactly
-    like the agent's own expanding training window.
+    like the agent's own expanding training window. `spy_agg_cache` holds the
+    FULL-SPAN SPY/AGG price series (see `_load_spy_agg_full_span`) so SPY-based
+    baselines never re-download per fold.
     """
     sl = df_full[(df_full["date"] >= test_start) & (df_full["date"] <= test_end)].copy()
     tickers = list(UNIVERSE)
@@ -138,9 +167,18 @@ def _baseline_fold_returns(
     if kind == "equal_weight":
         _, values, dates = equal_weight(sl, tickers)
     elif kind == "spy_bh":
-        _, values, dates = spy_buy_and_hold(start=test_start, end=test_end)
+        spy = spy_agg_cache.get("spy")
+        if spy is None:
+            raise RuntimeError("SPY price cache unavailable (see earlier warning)")
+        spy_win = spy[(spy.index >= pd.Timestamp(test_start)) & (spy.index <= pd.Timestamp(test_end))]
+        _, values, dates = spy_buy_and_hold_from_series(spy_win)
     elif kind == "spy_agg":
-        _, values, dates = spy_agg_60_40(start=test_start, end=test_end)
+        spy, agg = spy_agg_cache.get("spy"), spy_agg_cache.get("agg")
+        if spy is None or agg is None:
+            raise RuntimeError("SPY/AGG price cache unavailable (see earlier warning)")
+        mask_spy = (spy.index >= pd.Timestamp(test_start)) & (spy.index <= pd.Timestamp(test_end))
+        mask_agg = (agg.index >= pd.Timestamp(test_start)) & (agg.index <= pd.Timestamp(test_end))
+        _, values, dates = spy_agg_60_40_from_series(spy[mask_spy], agg[mask_agg])
     elif kind == "risk_parity":
         _, values, dates = risk_parity(sl, tickers, train_df=train_df_fold)
     elif kind == "mvo_lw_min_var":
@@ -158,7 +196,7 @@ def _baseline_fold_returns(
 
 def _equal_weight_returns(df_full: pd.DataFrame, test_start: str, test_end: str) -> pd.Series:
     """Backward-compat thin wrapper (equal-weight only)."""
-    return _baseline_fold_returns("equal_weight", df_full, df_full, test_start, test_end)
+    return _baseline_fold_returns("equal_weight", df_full, df_full, test_start, test_end, {})
 
 
 def _fold_significance(agent_rets: np.ndarray, test_dates: list, ew_ret: pd.Series) -> dict:
@@ -265,13 +303,17 @@ def run_walk_forward_eval(
     seeds, folds, test_months, min_train_months, episodes, warmup,
     config_path="tuning/best_config.json", out_dir="experiments/results",
     encoder="mlp", data_path="data/processed_data.parquet",
-    n_boot=10_000, n_trials=50,
+    n_boot=10_000, n_trials=50, turnover_penalty=None,
 ) -> dict:
     config = DEFAULT_CONFIG.copy()
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
             config.update(json.load(f))
         print(f"Loaded config from {config_path}")
+    # Phase 5 (Task B): CLI override for the turnover-penalty sweep.
+    if turnover_penalty is not None:
+        config["turnover_penalty"] = turnover_penalty
+        print(f"Turnover penalty (λ_turnover) = {turnover_penalty}")
 
     os.makedirs(out_dir, exist_ok=True)
     agent_factory, normalizer_factory = make_factories(config, encoder)
@@ -286,6 +328,13 @@ def run_walk_forward_eval(
     # Full chronological span so folds sweep across regimes.
     df = df[(df["date"] >= TRAIN_START) & (df["date"] <= TEST_END)].copy()
 
+    # Phase 4: fetch SPY/AGG ONCE for the full span; every fold slices this
+    # in-memory series instead of re-hitting yfinance (the pre-fix version did
+    # one download per fold per seed — 3 seeds x 9 folds x 2 symbols/pairs —
+    # and a rate-limit stall on one fold cost over a day of wall-clock time).
+    print("Pre-fetching SPY/AGG for the full span (once, not per fold)…")
+    spy_agg_cache = _load_spy_agg_full_span(str(df["date"].min().date()), str(df["date"].max().date()))
+
     rows = []
     for seed in seeds:
         print(f"\n── Seed {seed} ─────────────────────────────────────────────────")
@@ -295,6 +344,13 @@ def run_walk_forward_eval(
             n_folds=folds, test_months=test_months,
             min_train_months=min_train_months,
             train_episodes=episodes, warmup_steps=warmup,
+            env_kwargs={
+                "transaction_cost_rate": 0.001,
+                "slippage_rate": 0.001,
+                "initial_capital": 1_000_000.0,
+                # Phase 5 (Task B); shapes training reward, harmless at eval.
+                "turnover_penalty": config.get("turnover_penalty", 0.0),
+            },
         )
         for fr in fold_results:
             # Leak invariant (defence in depth; walk_forward also asserts it).
@@ -308,7 +364,8 @@ def run_walk_forward_eval(
             baseline_sig = {}
             for disp_name, kind in BASELINE_SPECS:
                 try:
-                    b_ret = _baseline_fold_returns(kind, df, train_df_fold, fr["test_start"], fr["test_end"])
+                    b_ret = _baseline_fold_returns(kind, df, train_df_fold, fr["test_start"], fr["test_end"],
+                                                    spy_agg_cache)
                     baseline_sig[disp_name] = _fold_significance(fr["agent_returns"], fr["test_dates"], b_ret)
                 except Exception as e:
                     print(f"    Baseline '{disp_name}' failed for fold {fr['fold']} seed {seed}: {e}")
@@ -528,6 +585,10 @@ def main():
     p.add_argument("--data", type=str, default="data/processed_data.parquet")
     p.add_argument("--bootstrap", type=int, default=10_000, dest="bootstrap")
     p.add_argument("--n-trials", type=int, default=50, dest="n_trials")
+    p.add_argument("--turnover-penalty", type=float, default=None,
+                   dest="turnover_penalty",
+                   help="λ_turnover reward penalty (Phase 5, Task B); "
+                        "overrides config. Omit to use config/default 0.0.")
     args = p.parse_args()
 
     run_walk_forward_eval(
@@ -535,7 +596,7 @@ def main():
         min_train_months=args.min_train_months, episodes=args.episodes,
         warmup=args.warmup, config_path=args.config, out_dir=args.out,
         encoder=args.encoder, data_path=args.data, n_boot=args.bootstrap,
-        n_trials=args.n_trials,
+        n_trials=args.n_trials, turnover_penalty=args.turnover_penalty,
     )
 
 

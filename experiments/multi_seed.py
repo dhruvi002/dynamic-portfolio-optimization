@@ -116,7 +116,8 @@ def _collect_baseline_return_series(baselines_full: dict) -> dict:
 def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
     set_global_seed(seed)
 
-    train_env = build_env(train_df, seed=seed)
+    train_env = build_env(train_df, seed=seed,
+                          turnover_penalty=config.get("turnover_penalty", 0.0))
     val_env = build_env(val_df, seed=seed)
     agent = build_agent(train_env, config, encoder=args.encoder)
     normalizer = RunningNormalizer(train_env.state_dim, n_skip=train_env.n_assets)
@@ -348,6 +349,10 @@ def main():
     p.add_argument("--block", type=float, default=10.0, help="avg block length (days) for stationary bootstrap")
     p.add_argument("--n-trials", type=int, default=50, dest="n_trials",
                    help="number of configurations tried (for the Deflated Sharpe haircut)")
+    p.add_argument("--turnover-penalty", type=float, default=None,
+                   dest="turnover_penalty",
+                   help="λ_turnover reward penalty (Phase 5, Task B); "
+                        "overrides config. Omit to use config/default 0.0.")
     args = p.parse_args()
 
     from main import DEFAULT_CONFIG
@@ -356,6 +361,10 @@ def main():
         with open(args.config) as f:
             config.update(json.load(f))
         print(f"Loaded config from {args.config}")
+    # Phase 5 (Task B): CLI override for the turnover-penalty sweep.
+    if args.turnover_penalty is not None:
+        config["turnover_penalty"] = args.turnover_penalty
+        print(f"Turnover penalty (λ_turnover) = {args.turnover_penalty}")
 
     os.makedirs(args.out, exist_ok=True)
     ckpt_dir = os.path.join(args.out, "checkpoints")
@@ -400,7 +409,9 @@ def main():
     print("\nRunning significance tests (Jobson–Korkie–Memmel + bootstrap + DSR) "
           "vs the full baseline panel…")
     baseline_series = _collect_baseline_return_series(baselines_full)
-    ew_ret = baseline_series.get("Equal Weight") or _equal_weight_return_series(test_df)
+    ew_ret = baseline_series.get("Equal Weight")
+    if ew_ret is None:
+        ew_ret = _equal_weight_return_series(test_df)
     significance = run_significance(per_seed_extras, baseline_series, per_seed_records, args)
 
     # ── Persist ──────────────────────────────────────────────────────────────────

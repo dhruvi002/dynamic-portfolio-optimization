@@ -10,11 +10,20 @@ Action space:
     Continuous weights ∈ [0,1]^n  (agent output; env normalises to sum=1)
 
 Reward:
-    log(portfolio_return) − λ_tc * transaction_cost − λ_slip * slippage
+    (log(net_value / prev_value) − λ_turnover * Σ|Δw|) * reward_scaling
 
 Where:
+    net_value        = gross_value − transaction_cost − slippage
     transaction_cost = tc_rate * sum(|Δw|) * portfolio_value
     slippage         = slip_rate * sum(|Δw|) * portfolio_value
+
+The log-return term is ALREADY net of transaction cost + slippage (they are
+subtracted from net_value). Phase 5 (Task B, I-10) adds an EXPLICIT, separately
+weighted turnover penalty `λ_turnover · Σ|Δw|` on top: at realistic turnover the
+realised cost is only ~a few bps/step, buried under ~1% daily moves and then
+shrunk by reward_scaling (1e-4), so the agent barely feels it. The explicit term
+gives a tunable, learnable signal to trade less when the edge doesn't cover the
+cost. Default λ_turnover = 0.0 preserves the pre-Phase-5 reward exactly.
 """
 
 import gymnasium as gym
@@ -45,6 +54,7 @@ class PortfolioEnv(gym.Env):
         transaction_cost_rate: float = 0.001,   # 0.1 %
         slippage_rate: float = 0.001,            # 0.1 %
         reward_scaling: float = 1e-4,
+        turnover_penalty: float = 0.0,           # λ_turnover (Phase 5, Task B)
         lookback: int = 1,
         seed: Optional[int] = None,
         sentiment_df: Optional[pd.DataFrame] = None,
@@ -60,6 +70,7 @@ class PortfolioEnv(gym.Env):
         self.tc_rate = transaction_cost_rate
         self.slip_rate = slippage_rate
         self.reward_scaling = reward_scaling
+        self.turnover_penalty = turnover_penalty
         self.lookback = lookback
 
         # Filter to only dates where ALL tickers have data
@@ -180,9 +191,14 @@ class PortfolioEnv(gym.Env):
         net = gross - tc - slip
         self.portfolio_value = max(net, 1.0)  # floor at $1 to avoid log(0)
 
-        # log(net / prev) — computed against prev_value, not the updated field
+        # log(net / prev) — computed against prev_value, not the updated field.
+        # Already net of tc+slip (they are subtracted from `net`). Phase 5
+        # (Task B) adds an explicit, separately-weighted turnover penalty so the
+        # cost becomes a learnable signal rather than a few bps lost in the noise
+        # of the log-return; λ_turnover=0.0 reproduces the pre-Phase-5 reward.
         log_return = np.log(max(net, 1e-8) / prev_value)
-        reward = float(log_return * self.reward_scaling)
+        reward = float((log_return - self.turnover_penalty * turnover)
+                       * self.reward_scaling)
 
         self.weights = new_weights
         self.prices = new_prices
