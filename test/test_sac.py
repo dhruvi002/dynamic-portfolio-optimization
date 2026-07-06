@@ -188,7 +188,9 @@ def test_alpha_cannot_blow_up():
     for _ in range(50):
         a.update()
         assert 0.05 - 1e-6 <= a.alpha <= 2.0 + 1e-6, f"alpha escaped band: {a.alpha}"
-        assert a._log_alpha_min <= a.log_alpha.item() <= a._log_alpha_max
+        # log_alpha is float32; the clamp bounds are float64 python floats, so
+        # allow a tiny tolerance for the stored-value rounding at the boundary.
+        assert a._log_alpha_min - 1e-5 <= a.log_alpha.item() <= a._log_alpha_max + 1e-5
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
