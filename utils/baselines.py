@@ -286,6 +286,72 @@ def max_sharpe_mvo(
 # net of cost, same cost model, no look-ahead (estimators use only data with
 # date <= rebalance date).
 
+def _cached_yf_download(tickers: tuple, start: str, end: str) -> pd.DataFrame:
+    """
+    Memoized yfinance download keyed by (tickers, start, end). Repeated exact
+    calls (e.g. re-running a harness) hit the cache instead of the network.
+
+    NOTE: this does NOT dedupe across *different* (start, end) windows — e.g.
+    walk-forward's per-fold baselines each use a different fold window, so this
+    alone won't prevent per-fold downloads. Callers that iterate many
+    overlapping windows (walk_forward_eval.py) should instead download the
+    FULL span ONCE and pass sliced price Series into the `*_from_series`
+    variants below (`spy_buy_and_hold_from_series`, `spy_agg_60_40_from_series`)
+    rather than calling `spy_buy_and_hold`/`spy_agg_60_40` per fold — a Phase-4
+    run hit multi-hour stalls from repeated per-fold yfinance calls before this
+    split was added.
+    """
+    import yfinance as yf
+    if len(tickers) == 1:
+        raw = yf.download(tickers[0], start=start, end=end, auto_adjust=True, progress=False)["Close"]
+    else:
+        raw = yf.download(list(tickers), start=start, end=end, auto_adjust=True,
+                          progress=False, multi_level_index=True)["Close"]
+        raw = raw[list(tickers)]
+    raw = raw.dropna()
+    raw.index = pd.to_datetime(raw.index)
+    return raw.sort_index()
+
+
+_YF_CACHE: dict = {}
+
+
+def _yf_download(tickers: tuple, start: str, end: str) -> pd.DataFrame:
+    key = (tickers, str(start), str(end))
+    if key not in _YF_CACHE:
+        _YF_CACHE[key] = _cached_yf_download(tickers, start, end)
+    return _YF_CACHE[key]
+
+
+def _values_from_prices(prices: np.ndarray, initial_capital: float, tc_rate: float, slip_rate: float) -> np.ndarray:
+    """Single entry-cost buy-and-hold value path (no further rebalancing)."""
+    entry_cost = (tc_rate + slip_rate) * 1.0 * initial_capital
+    capital_after_entry = initial_capital - entry_cost
+    shares = capital_after_entry / (prices[0] + 1e-12)
+    return shares * prices
+
+
+def spy_buy_and_hold_from_series(
+    spy_prices: pd.Series,
+    initial_capital: float = 1e6,
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """
+    SPY buy-and-hold computed from an ALREADY-DOWNLOADED price series (sliced
+    to the desired window by the caller). Use this in loops over many windows
+    (e.g. walk-forward folds) to avoid a yfinance call per window — download
+    the full span once with `spy_buy_and_hold`'s helper `_yf_download` (or your
+    own fetch) and slice per window.
+    """
+    s = spy_prices.dropna().sort_index()
+    prices = np.asarray(s.values, dtype=float).flatten()
+    dates = list(s.index)
+    values = _values_from_prices(prices, initial_capital, tc_rate, slip_rate)
+    returns = np.diff(values) / (values[:-1] + 1e-10)
+    return compute_all_metrics(returns, values), values, dates
+
+
 def spy_buy_and_hold(
     start: str,
     end: str,
@@ -297,25 +363,29 @@ def spy_buy_and_hold(
     Single-asset SPY buy-and-hold. Enters the full position once at t0 (paying
     the entry turnover cost, Σ|Δw| = 1, exactly like PortfolioEnv), then holds
     with no further rebalancing — the canonical market benchmark. Downloads SPY
-    from yfinance for [start, end].
+    from yfinance for [start, end] (cached; see `_yf_download`).
     Returns (metrics_dict, portfolio_values, dates).
     """
-    import yfinance as yf
+    raw = _yf_download(("SPY",), start, end)
+    s = pd.Series(np.asarray(raw.values, dtype=float).flatten(), index=raw.index)
+    return spy_buy_and_hold_from_series(s, initial_capital, tc_rate, slip_rate)
 
-    raw = yf.download("SPY", start=start, end=end, auto_adjust=True, progress=False)["Close"]
-    raw = raw.dropna()
-    raw.index = pd.to_datetime(raw.index)
-    raw = raw.sort_index()
-    prices = np.asarray(raw.values, dtype=float).flatten()
-    dates = list(raw.index)
 
-    entry_cost = (tc_rate + slip_rate) * 1.0 * initial_capital
-    capital_after_entry = initial_capital - entry_cost
-    shares = capital_after_entry / (prices[0] + 1e-12)
-    values = shares * prices  # no further costs — pure buy-and-hold value path
-
-    returns = np.diff(values) / (values[:-1] + 1e-10)
-    return compute_all_metrics(returns, values), values, dates
+def spy_agg_60_40_from_series(
+    spy_prices: pd.Series,
+    agg_prices: pd.Series,
+    weight_spy: float = 0.6,
+    weight_agg: float = 0.4,
+    initial_capital: float = 1e6,
+    rebalance_freq: str = "ME",
+    tc_rate: float = 0.001,
+    slip_rate: float = 0.001,
+) -> Tuple[dict, np.ndarray, list]:
+    """60/40 SPY/AGG from ALREADY-DOWNLOADED price series (see `spy_buy_and_hold_from_series`)."""
+    raw = pd.DataFrame({"SPY": spy_prices, "AGG": agg_prices}).dropna().sort_index()
+    target = np.array([weight_spy, weight_agg])
+    return _run_rebalancing(raw, lambda d, p, w: target.copy(),
+                            initial_capital, rebalance_freq, tc_rate, slip_rate)
 
 
 def spy_agg_60_40(
@@ -332,20 +402,14 @@ def spy_agg_60_40(
     The classic 60/40 balanced benchmark: 60% SPY / 40% AGG (US aggregate
     bonds), monthly rebalance, transaction costs. This — not `spy_qqq` (two
     tech-heavy equity ETFs) — is what "60/40" means in practice. Downloads
-    SPY+AGG from yfinance for [start, end].
+    SPY+AGG from yfinance for [start, end] (cached; see `_yf_download`).
     Returns (metrics_dict, portfolio_values, dates).
     """
-    import yfinance as yf
-
-    raw = yf.download(["SPY", "AGG"], start=start, end=end, auto_adjust=True,
-                      progress=False, multi_level_index=True)["Close"]
-    raw = raw[["SPY", "AGG"]].dropna()
-    raw.index = pd.to_datetime(raw.index)
-    raw = raw.sort_index()
-
-    target = np.array([weight_spy, weight_agg])
-    return _run_rebalancing(raw, lambda d, p, w: target.copy(),
-                            initial_capital, rebalance_freq, tc_rate, slip_rate)
+    raw = _yf_download(("SPY", "AGG"), start, end)
+    return spy_agg_60_40_from_series(
+        raw["SPY"], raw["AGG"], weight_spy, weight_agg,
+        initial_capital, rebalance_freq, tc_rate, slip_rate,
+    )
 
 
 def _inverse_vol_weights(returns_window: pd.DataFrame, n: int) -> np.ndarray:
