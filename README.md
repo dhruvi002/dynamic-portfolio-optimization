@@ -196,7 +196,8 @@ set (`config.UNIVERSE`): the **24 names that were continuous DJIA members across
 | INTC | removed 2024-11-08 |
 | SHW | joined 2024-11-08 (back-filling to 2018 is look-ahead) |
 
-Full rationale in `docs/PHASE2_NOTES.md`.
+The excluded tickers are listed above; the leakage-free universe is defined in
+`config.UNIVERSE`.
 
 ---
 
@@ -232,7 +233,6 @@ Full rationale in `docs/PHASE2_NOTES.md`.
 
 ## Project history
 
-Remediation is documented phase-by-phase in `docs/` (`PHASE1`–`PHASE5` notes/handovers):
-reproducibility → leakage removal → multi-regime evaluation → strong baseline
-panel → entropy fix + cost-aware reward. The consolidated result is in
-[`RESULTS.md`](RESULTS.md).
+The project was remediated in phases: reproducibility → leakage removal →
+multi-regime evaluation → strong baseline panel → entropy fix + cost-aware
+reward. The consolidated result is in [`RESULTS.md`](RESULTS.md).
