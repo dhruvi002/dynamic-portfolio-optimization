@@ -45,13 +45,15 @@ NORMALIZER_PATH = "checkpoints/normalizer.pkl"
 
 
 def build_env(df: pd.DataFrame, sentiment_df: pd.DataFrame = None,
-              seed: int = None, turnover_penalty: float = 0.0) -> PortfolioEnv:
+              seed: int = None, turnover_penalty: float = 0.0,
+              reward_scaling: float = 1e-4) -> PortfolioEnv:
     return PortfolioEnv(
         df,
         transaction_cost_rate=0.001,
         slippage_rate=0.001,
         initial_capital=1_000_000.0,
         turnover_penalty=turnover_penalty,   # Phase 5 (Task B); 0.0 = no change
+        reward_scaling=reward_scaling,        # sweepable; controls critic-vs-entropy balance
         sentiment_df=sentiment_df,
         seed=seed,
     )
@@ -176,7 +178,8 @@ def mode_train(args, config: dict):
         merged_sentiment_df = sentiment_df
 
     train_env = build_env(train_df, sentiment_df=merged_sentiment_df, seed=args.seed,
-                          turnover_penalty=config.get("turnover_penalty", 0.0))
+                          turnover_penalty=config.get("turnover_penalty", 0.0),
+                          reward_scaling=config.get("reward_scaling", 1e-4))
     val_env   = build_env(val_df, sentiment_df=merged_sentiment_df, seed=args.seed)
     agent     = build_agent(train_env, config, encoder=args.encoder)
     print(f"  State dim: {train_env.state_dim}  |  Action dim: {train_env.action_dim}")

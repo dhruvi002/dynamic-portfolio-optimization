@@ -32,7 +32,7 @@ import pandas as pd
 
 
 def _label(d: str) -> str:
-    """Best-effort λ label: prefer the stamped config, else the directory name."""
+    """Best-effort label from the stamped config (λ and/or reward_scaling), else dir name."""
     for meta in ("run_meta.json", "aggregate_metrics.json"):
         p = os.path.join(d, meta)
         if os.path.exists(p):
@@ -40,8 +40,13 @@ def _label(d: str) -> str:
                 with open(p) as f:
                     blob = json.load(f)
                 cfg = blob.get("config", blob)
-                if isinstance(cfg, dict) and "turnover_penalty" in cfg:
-                    return f"λ={float(cfg['turnover_penalty']):g}"
+                if isinstance(cfg, dict) and ("turnover_penalty" in cfg or "reward_scaling" in cfg):
+                    parts = []
+                    if "turnover_penalty" in cfg:
+                        parts.append(f"λ={float(cfg['turnover_penalty']):g}")
+                    if "reward_scaling" in cfg:
+                        parts.append(f"rs={float(cfg['reward_scaling']):g}")
+                    return " ".join(parts)
             except Exception:
                 pass
     return os.path.basename(os.path.normpath(d))
@@ -114,7 +119,7 @@ def main():
     hdr = (f"{'run':<16}{'seeds':>6}{'net Sharpe':>18}{'gross':>9}"
            f"{'gap':>8}{'turnover':>10}{'act.sh':>8}{'alpha[min,max]':>18}")
     print("\n" + "=" * len(hdr))
-    print("  TURNOVER-PENALTY SWEEP  (net-of-cost is the honest headline)")
+    print("  TURNOVER-PENALTY SWEEP  (net-of-cost headline)")
     print("=" * len(hdr))
     print(hdr)
     print("-" * len(hdr))

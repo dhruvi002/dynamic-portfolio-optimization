@@ -117,7 +117,8 @@ def run_one_seed(seed, train_df, val_df, test_df, config, args, ckpt_dir):
     set_global_seed(seed)
 
     train_env = build_env(train_df, seed=seed,
-                          turnover_penalty=config.get("turnover_penalty", 0.0))
+                          turnover_penalty=config.get("turnover_penalty", 0.0),
+                          reward_scaling=config.get("reward_scaling", 1e-4))
     val_env = build_env(val_df, seed=seed)
     agent = build_agent(train_env, config, encoder=args.encoder)
     normalizer = RunningNormalizer(train_env.state_dim, n_skip=train_env.n_assets)
@@ -353,6 +354,10 @@ def main():
                    dest="turnover_penalty",
                    help="λ_turnover reward penalty (Phase 5, Task B); "
                         "overrides config. Omit to use config/default 0.0.")
+    p.add_argument("--reward-scaling", type=float, default=None,
+                   dest="reward_scaling",
+                   help="reward_scaling override; controls critic-vs-entropy "
+                        "balance. Omit to use config/default 1e-4.")
     args = p.parse_args()
 
     from main import DEFAULT_CONFIG
@@ -365,6 +370,9 @@ def main():
     if args.turnover_penalty is not None:
         config["turnover_penalty"] = args.turnover_penalty
         print(f"Turnover penalty (λ_turnover) = {args.turnover_penalty}")
+    if args.reward_scaling is not None:
+        config["reward_scaling"] = args.reward_scaling
+        print(f"Reward scaling = {args.reward_scaling}")
 
     os.makedirs(args.out, exist_ok=True)
     ckpt_dir = os.path.join(args.out, "checkpoints")
