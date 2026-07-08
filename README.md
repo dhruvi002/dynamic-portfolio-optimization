@@ -1,173 +1,238 @@
 # Deep RL Portfolio Optimization
 
-A self-optimizing trading agent using **Soft Actor-Critic (SAC)** to dynamically manage a 30-asset Dow Jones portfolio, achieving a **+24% improvement in Sharpe Ratio** over an equal-weight baseline.
+A Soft Actor-Critic (SAC) agent with a Dirichlet policy that allocates a fixed
+24-asset large-cap US equity portfolio, evaluated under a reproducible,
+leakage-free, multi-seed, multi-regime, **cost-inclusive** protocol against a
+panel of standard benchmarks.
 
-Built with PyTorch, FinRL, and Ray Tune. Trained and backtested on real market data (2019–2025).
+Built with PyTorch, a hand-rolled FinRL-*compatible* Gymnasium environment
+(not FinRL-powered), and a leak-free hyperparameter search. Trained and
+backtested on real market data (2019–2025), CPU-only.
 
----
-
-## Results
-
-Backtested on out-of-sample data from **January 2023 – January 2025**:
-
-| Metric | SAC Agent | Equal-Weight Baseline | Δ |
-|---|---|---|---|
-| **Sharpe Ratio** | **1.863** | 1.504 | **+24%** |
-| **Sortino Ratio** | **2.977** | 2.297 | **+30%** |
-| **Calmar Ratio** | **3.010** | 2.122 | **+42%** |
-| **Max Drawdown** | **-6.9%** | -8.4% | **+1.5%** |
-| **Total Return** | **47.3%** | 40.6% | **+6.7%** |
-| **Ann. Return** | **20.8%** | 17.8% | **+3.0%** |
-| **Ann. Volatility** | **10.1%** | 10.9% | **lower** |
-| **Final Value** | **$1,472,567** | $1,405,453 | **+$67,114** |
-
-> Starting capital: $1,000,000. Transaction costs: 0.1%. Slippage: 0.1%.
+> **Result in one line:** net of realistic transaction costs, the agent does
+> **not** beat any standard benchmark. Its gross (pre-cost) Sharpe is
+> competitive, but turnover cost erases the edge; its best-behaving runs
+> converge toward equal-weight and cannot beat it. This is a negative result,
+> established rigorously — it replaces an earlier unseeded, leaky backtest that
+> had claimed "+24% Sharpe / +47% return." Full detail in
+> [`RESULTS.md`](RESULTS.md).
 
 ---
 
-## Plots
+## Results (net of cost)
 
-### Portfolio Value vs Equal-Weight Baseline
-![Backtest Comparison](plots/backtest_comparison.png)
+Test window **Jan 2023 – Jan 2025**, 5 seeds × 500 episodes. Sharpe is
+value-path, net of 0.1% transaction + 0.1% slippage cost, applied identically
+to the agent and every baseline.
 
-### Training Curves (500 Episodes)
-![Training Curves](plots/training_curves.png)
+| Strategy | Net Sharpe |
+|---|---|
+| SPY/QQQ 60/40 | +1.98 |
+| SPY Buy & Hold | +1.92 |
+| 60/40 SPY/AGG | +1.87 |
+| Risk Parity | +1.69 |
+| **Equal Weight** | **+1.63** |
+| Rolling MVO-LW (max-Sharpe) | +1.61 |
+| Max-Sharpe MVO (static) | +1.46 |
+| Rolling MVO-LW (min-var) | +1.34 |
+| Min Variance (static) | +1.05 |
+| **SAC agent (entropy-fixed)** | **+0.84 ± 0.60** (gross +1.62) |
+| Momentum 12-1 | +0.89 |
 
-### Portfolio Weight Allocation Over Time
-![Weight Heatmap](plots/weight_heatmap.png)
+The agent's gross Sharpe (~+1.6) is in the benchmark range; a ~0.6–1.0
+transaction-cost drag from turnover is the entire gap. It sits above the two
+weakest baselines and below equal-weight and every strong benchmark.
+
+**Walk-forward (27 folds across COVID / 2021 bull / 2022 bear / 2023-24
+recovery):** overall net Sharpe **+0.59 ± 1.54**, beats equal-weight in
+**0/27 folds**. See [`RESULTS.md`](RESULTS.md) for per-regime tables and
+significance.
+
+Figures: `experiments/results/walk_forward_baseline_panel.png` (agent vs full
+panel, per regime) and `experiments/results/walk_forward_regimes.png`.
 
 ---
 
 ## Why Soft Actor-Critic?
 
-Portfolio optimization is a continuous control problem — the agent must output a weight vector across 30 assets at every timestep. SAC is well-suited for this because:
+Portfolio allocation is a continuous-control problem — the agent outputs a
+weight vector over 24 assets every step. SAC fits because:
 
-- **Maximum entropy framework** — SAC optimizes for both reward *and* policy entropy, which prevents overcommitting to a single asset allocation and naturally encourages diversification
-- **Automatic entropy tuning** — the temperature parameter α is learned during training, automatically balancing exploration vs exploitation without manual tuning
-- **Twin critics** — two Q-networks trained in parallel reduce Q-value overestimation, leading to more stable and conservative policy updates — important in financial environments where overconfidence is costly
-- **Off-policy** — SAC reuses past experience via a replay buffer, making it sample-efficient even on CPU
+- **Maximum-entropy objective** — optimizes reward *and* policy entropy, which
+  discourages overcommitting to one allocation and encourages diversification.
+- **Automatic entropy tuning** — the temperature α is learned. (See the
+  Limitations section: on this problem α saturates at its clamp, effectively
+  acting as a fixed strong entropy regularizer.)
+- **Twin critics** — two Q-networks reduce Q-value overestimation, important in
+  a domain where overconfidence is costly.
+- **Off-policy** — a replay buffer makes it sample-efficient on CPU.
+
+The policy is a **Dirichlet distribution on the K-simplex**, so samples are
+valid portfolio weights (non-negative, sum to 1) with an exact log-density — no
+softmax/Jacobian approximation.
 
 ---
 
 ## Architecture
 
 ```
-portfolio_rl/
+dynamic-portfolio-optimization/
 ├── agent/
-│   └── sac.py              # SAC: Actor, Twin Critics, ReplayBuffer, auto entropy tuning
+│   └── sac.py                    # SAC: DirichletActor, twin Critics, ReplayBuffer,
+│                                 #   bounded auto entropy tuning, optional transformer encoder
 ├── environment/
-│   └── portfolio_env.py    # FinRL-compatible Gymnasium env (30 assets, costs, slippage)
+│   └── portfolio_env.py          # FinRL-compatible Gymnasium env (24 assets, costs, slippage)
 ├── data/
-│   └── pipeline.py         # yfinance download + MACD, RSI, CCI, ADX features
+│   └── pipeline.py               # yfinance download + MACD, RSI, CCI, ADX features
 ├── tuning/
-│   └── tune_runner.py      # Ray Tune ASHA scheduler + HyperOpt TPE (50 trials)
+│   └── tune_runner.py            # leak-free HPO (Ray Tune w/ Ray-free fallback)
 ├── utils/
-│   ├── metrics.py          # Sharpe, Sortino, Calmar, Max Drawdown
-│   ├── trainer.py          # Training loop + backtest runner
-│   └── plotting.py         # Portfolio value, drawdown, weight heatmap plots
-├── checkpoints/            # Saved model weights + training logs
-├── plots/                  # Generated figures
-└── main.py                 # CLI: train / tune / backtest
+│   ├── metrics.py                # Sharpe, Sortino, Calmar, max drawdown
+│   ├── baselines.py              # equal-weight, SPY B&H, 60/40, risk parity, rolling MVO-LW, …
+│   ├── walk_forward.py           # expanding-window, net-of-cost, leak-guarded
+│   ├── significance.py           # Jobson–Korkie–Memmel, bootstrap CI, PSR/DSR/PBO
+│   ├── seeding.py                # global seeding + CPU determinism (thread pinning)
+│   ├── trainer.py                # training loop + backtest runner
+│   └── plotting.py               # portfolio value, drawdown, weight/panel figures
+├── experiments/
+│   ├── multi_seed.py             # single-window multi-seed harness (make evaluate)
+│   ├── walk_forward_eval.py      # multi-regime walk-forward harness (make walkforward)
+│   └── compare_sweep.py          # side-by-side sweep comparison
+├── test/                         # pytest suite incl. leak / walk-forward / baseline guards
+├── config.py                     # date windows + 24-name UNIVERSE
+└── main.py                       # CLI: train / tune / backtest / walkforward
 ```
 
-**State space** (180-dim): portfolio weights (30) + daily returns (30) + technical indicators (30 × 4: MACD, RSI, CCI, ADX)
+**State space (144-dim):** portfolio weights (24) + daily returns (24) +
+technical indicators (24 × 4: MACD, RSI, CCI, ADX).
 
-**Action space** (30-dim): continuous portfolio weights ∈ [0,1], normalized to sum to 1 via softmax
+**Action space (24-dim):** portfolio weights on the simplex (Dirichlet policy;
+the env also clips/normalizes any raw action to sum to 1).
 
-**Reward**: log portfolio return − transaction cost penalty − slippage penalty
+**Reward:** `(log(net_value / prev_value) − λ_turnover · Σ|Δw|) · reward_scaling`.
+The log-return term is already net of transaction + slippage cost; `λ_turnover`
+(default 0) adds an optional explicit turnover penalty.
 
 ---
 
 ## Quickstart
 
-### 1. Install dependencies
+### 1. Install
 ```bash
-conda create -n portfolio-rl python=3.11
+conda env create -f environment.yml    # creates the `portfolio-rl` env (Python 3.10, CPU)
 conda activate portfolio-rl
-pip install -r requirements.txt
 ```
 
-### 2. Train
+### 2. Reproducibility check
 ```bash
-python main.py --mode train --episodes 500
+make test        # full unit suite
+make repro       # trains twice at one seed; asserts identical logs
 ```
-Downloads DJ30 data (2019–2025), computes indicators, trains SAC for 500 episodes (~20 min on CPU). Saves best checkpoint to `checkpoints/best_agent.pt`.
 
-### 3. Hyperparameter optimization (optional)
+### 3. Train
 ```bash
-python main.py --mode tune --tune-samples 50
+python main.py --mode train --episodes 500 --config tuning/best_config.json
 ```
-Runs 50 Ray Tune trials with ASHA early stopping and HyperOpt TPE search across learning rates, gamma, tau, batch size, and network width. Saves best config to `tuning/best_config.json`.
+Downloads the 24-name universe (2019–2025), computes indicators, trains SAC,
+saves the best-by-validation-Sharpe checkpoint to `checkpoints/best_agent.pt`.
 
-### 4. Backtest
+### 4. Evaluate (multi-seed + walk-forward harnesses)
 ```bash
-python main.py --mode backtest --checkpoint checkpoints/best_agent.pt
+# single-window, multi-seed, vs the full baseline panel
+python experiments/multi_seed.py --seeds 0 1 2 3 4 --episodes 500 --config tuning/best_config.json
+
+# multi-regime walk-forward
+python experiments/walk_forward_eval.py --seeds 0 1 2 --folds 9 --test-months 6 \
+    --min-train-months 12 --episodes 200 --config tuning/best_config.json
 ```
-Runs deterministic rollout on held-out test data and prints full metrics table. Saves plots to `plots/`.
+
+Optional knobs: `--turnover-penalty <λ>` and `--reward-scaling <s>` (both were
+swept; see [`RESULTS.md`](RESULTS.md)).
 
 ---
 
-## Environment Details
+## Environment details
 
 | Parameter | Value |
 |---|---|
-| Assets | 24-name fixed neutral universe (see Phase 2 below) |
+| Assets | 24-name fixed neutral universe (see Leakage removal below) |
+| State / action dim | 144 / 24 |
 | Training period | Apr 2019 – Dec 2021 (train) / 2022 (validation) |
 | Test period | Jan 2023 – Jan 2025 |
-| Transaction cost | 0.1% per turnover |
-| Slippage | 0.1% per turnover |
+| Transaction cost | 0.1% per unit turnover |
+| Slippage | 0.1% per unit turnover |
 | Initial capital | $1,000,000 |
 | Rebalancing | Daily |
 
 ---
 
-## Phase 2 — Leakage removal (I-3, I-4)
+## Evaluation rigor
 
-> The original headline ("+24% Sharpe") rested on a single unseeded backtest **with
-> two leaks**. Phases 0–1 made evaluation reproducible and CI/significance-backed;
-> Phase 2 removes the leaks and re-runs the unchanged Phase 1 harness. **Leak-free
-> result (5 seeds × 500 ep):** net Sharpe **−0.08** [95% CI −0.52, +0.66] vs
-> Equal-Weight **1.63** — the agent **loses to equal-weight after costs**; 4/5
-> seeds significantly worse (median p ≈ 3.7e-10), Deflated Sharpe **0.004**. The
-> gross (pre-cost) Sharpe is +1.49 but a ~1.57 Sharpe transaction-cost drag at
-> 0.35/step turnover erases it. **Treat the legacy "+24%" numbers above as
-> superseded.** Full table and Phase 1→2 comparison in `PHASE2_NOTES.md`.
+- **Reproducible:** global seeding, version-pinned deps, run metadata stamped;
+  `make repro` gives identical logs for identical seeds (CPU threads pinned).
+- **Leakage-free:** the HPO no longer sees the test set, and the universe is a
+  disclosed fixed set with no look-ahead (see below). Guarded by
+  `test/test_no_leak.py`, `test/test_walk_forward.py`, `test/test_baselines.py`.
+- **Cost-inclusive:** every headline metric is net of cost via the value path;
+  gross is reported alongside to isolate the turnover drag.
+- **Statistically stated:** per-seed / per-(seed,fold) Jobson–Korkie–Memmel is
+  primary; pooled JK, bootstrap CIs, and the Deflated Sharpe Ratio are
+  cross-checks. Results span four market regimes over 27 walk-forward folds.
 
-**I-3 — HPO no longer sees the test set.** The Ray Tune trial path
-(`tuning/tune_runner.py`) previously trained and scored on the *entire*
-2019–2025 series (including the 2023–2025 test window), so the test set influenced
-the selected hyperparameters. Each trial now does a chronological
-`three_way_split`, trains on **train only**, and reports the **deterministic,
-net-of-cost validation Sharpe** as its objective — matching the metric the Phase 1
-harness reports. Trials are seeded for reproducibility, and a hard guard
-(`test/test_no_leak.py`) asserts no test-window row ever enters tuning. The old
-hyperparameters are archived at `tuning/best_config_LEAKED.json`.
+### Leakage removal (I-3, I-4)
 
-**I-4 — survivorship / look-ahead universe.** The universe was the *current*
-Dow-30 with Sherwin-Williams (SHW) back-filled to 2018; SHW only joined the DJIA
-in Nov 2024. The trading universe is now a **disclosed fixed neutral set**
-(`config.UNIVERSE`): the **24 names that were continuous DJIA members across the
-entire 2018-01 → 2025-01 window** — not the live DJ-30, and carrying no
-foreknowledge of index changes. Excluded mid-sample joiners/leavers:
+**I-3 — HPO no longer sees the test set.** Each tuning trial does a chronological
+`three_way_split`, trains on train only, and scores on the deterministic,
+net-of-cost **validation** Sharpe. Seeded and guarded by `test/test_no_leak.py`.
+
+**I-4 — survivorship / look-ahead universe.** The universe is a disclosed fixed
+set (`config.UNIVERSE`): the **24 names that were continuous DJIA members across
+2018-01 → 2025-01** — not the live DJ-30. Excluded mid-sample joiners/leavers:
 
 | Excluded | Reason |
 |---|---|
-| AMGN, CRM, HON | joined the DJIA 2020-08-31 (not members during 2019–mid-2020 training) |
-| DOW | joined 2019-04-02, removed 2024-11-08 (not continuous across the window) |
-| INTC | removed from the DJIA 2024-11-08 (not a member through the window end) |
-| SHW | joined the DJIA 2024-11-08 (back-filling to 2018 is look-ahead bias) |
+| AMGN, CRM, HON | joined the DJIA 2020-08-31 |
+| DOW | joined 2019-04-02, removed 2024-11-08 (not continuous) |
+| INTC | removed 2024-11-08 |
+| SHW | joined 2024-11-08 (back-filling to 2018 is look-ahead) |
 
-See `PHASE2_NOTES.md` for the full rationale and the re-measurement procedure.
+Full rationale in `PHASE2_NOTES.md`.
 
 ---
 
-## Tech Stack
+## Limitations
+
+- **No net-of-cost edge.** The agent does not beat equal-weight or any strong
+  benchmark after costs (0/27 walk-forward folds). Its active tilts are
+  value-destroying net of cost; the best it does is rediscover diversification.
+- **Seed instability.** Per-seed net Sharpe spans ~0.1 to ~1.5 depending on
+  which basin a seed lands in; 3–5 seeds bound but do not remove this.
+- **No result survives the multiple-testing haircut** (Deflated Sharpe ≈ 0).
+- **α saturates** at its clamp ceiling across every tested setting — the clamp
+  is a fixed strong regularizer, not a tuned quantity.
+- **HPO transfer gap.** Hyperparameters were tuned with a short (15-episode)
+  proxy; transfer to 500-episode runs is not validated, and the reward-shape
+  change argues for a re-tune not yet done.
+
+---
+
+## Tech stack
 
 | Component | Library |
 |---|---|
-| RL Agent | PyTorch (custom SAC) |
-| Trading Environment | FinRL / Gymnasium |
+| RL agent | PyTorch (custom SAC + Dirichlet policy) |
+| Environment | Gymnasium (hand-rolled, FinRL-compatible; FinRL not used) |
 | Data | yfinance |
-| Technical Indicators | ta |
-| Hyperparameter Tuning | Ray Tune + HyperOpt |
-| Experiment Tracking | TensorBoard |
+| Technical indicators | ta |
+| Baselines / stats | NumPy, pandas, scikit-learn (Ledoit-Wolf) |
+| Hyperparameter tuning | Ray Tune + HyperOpt (Ray-free fallback) |
+| Experiment tracking | TensorBoard |
+
+---
+
+## Project history
+
+Remediation is documented phase-by-phase in `PHASE1`–`PHASE5` notes/handovers:
+reproducibility → leakage removal → multi-regime evaluation → strong baseline
+panel → entropy fix + cost-aware reward. The consolidated result is in
+[`RESULTS.md`](RESULTS.md).
